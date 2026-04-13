@@ -140,7 +140,7 @@ class TestGroupByWeekCLI:
         corpus_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],  # type: ignore[type-arg]
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
         captured = capsys.readouterr()
@@ -152,7 +152,7 @@ class TestGroupByWeekCLI:
         self,
         corpus_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],  # type: ignore[type-arg]
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
         captured = capsys.readouterr()
@@ -162,7 +162,7 @@ class TestGroupByWeekCLI:
         self,
         corpus_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],  # type: ignore[type-arg]
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
         captured = capsys.readouterr()
@@ -176,7 +176,7 @@ class TestGroupByWeekCLI:
         self,
         corpus_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],  # type: ignore[type-arg]
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
         captured = capsys.readouterr()
@@ -226,7 +226,7 @@ class TestComparePeriodsDataCLI:
         self,
         corpus_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],  # type: ignore[type-arg]
+        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(
             [

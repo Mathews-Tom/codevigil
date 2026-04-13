@@ -294,7 +294,7 @@ class TestLoaderEdgeCases:
             value=5.0,
             label="R:E 5.0",
             severity=Severity.OK,
-            detail=None,  # type: ignore[arg-type]  # intentionally None for this test
+            detail=None,  # intentionally None for this test
         )
         snapshots = {"read_edit_ratio": snap_no_detail}
         _inject_write_precision(metrics, snapshots)

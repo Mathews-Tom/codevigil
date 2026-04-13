@@ -40,6 +40,7 @@ class TestWritePrecision:
         c.ingest(_event("read", "/f.py"))
         c.ingest(_event("read", "/g.py"))
         snap = c.snapshot()
+        assert snap.detail is not None
         assert snap.detail["write_precision"] is None
 
     def test_one_when_only_write_calls(self) -> None:
@@ -48,6 +49,7 @@ class TestWritePrecision:
         c.ingest(_event("write", "/f.py"))
         c.ingest(_event("write", "/g.py"))
         snap = c.snapshot()
+        assert snap.detail is not None
         assert snap.detail["write_precision"] == 1.0
 
     def test_zero_when_only_edit_calls(self) -> None:
@@ -56,6 +58,7 @@ class TestWritePrecision:
         c.ingest(_event("edit", "/f.py"))
         c.ingest(_event("multi_edit", "/f.py"))
         snap = c.snapshot()
+        assert snap.detail is not None
         assert snap.detail["write_precision"] == 0.0
 
     def test_half_when_equal_write_and_edit(self) -> None:
@@ -64,6 +67,7 @@ class TestWritePrecision:
         c.ingest(_event("write", "/f.py"))
         c.ingest(_event("edit", "/f.py"))
         snap = c.snapshot()
+        assert snap.detail is not None
         assert snap.detail["write_precision"] == pytest.approx(0.5, abs=1e-6)
 
     def test_notebook_edit_counts_as_edit(self) -> None:
@@ -73,6 +77,7 @@ class TestWritePrecision:
         c.ingest(_event("notebook_edit", "/nb.py"))
         snap = c.snapshot()
         # 1 write, 1 notebook_edit => precision = 0.5
+        assert snap.detail is not None
         assert snap.detail["write_precision"] == pytest.approx(0.5, abs=1e-6)
 
     def test_write_calls_and_edit_calls_in_detail(self) -> None:
@@ -82,6 +87,7 @@ class TestWritePrecision:
         c.ingest(_event("write", "/f.py"))
         c.ingest(_event("edit", "/f.py"))
         snap = c.snapshot()
+        assert snap.detail is not None
         assert snap.detail["write_calls"] == 2
         assert snap.detail["edit_calls"] == 1
 
@@ -91,6 +97,7 @@ class TestWritePrecision:
         c.ingest(_event("write", "/f.py"))
         c.reset()
         snap = c.snapshot()
+        assert snap.detail is not None
         assert snap.detail["write_precision"] is None
         assert snap.detail["write_calls"] == 0
         assert snap.detail["edit_calls"] == 0
@@ -104,6 +111,7 @@ class TestWritePrecision:
         c.ingest(_event("write", "/f.py"))
         snap = c.snapshot()
         # write_precision should be 1.0 (one write, zero edits).
+        assert snap.detail is not None
         assert snap.detail["write_precision"] == 1.0
 
 

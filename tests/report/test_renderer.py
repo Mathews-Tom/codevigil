@@ -447,7 +447,7 @@ class TestMetricsOnlyOneDirection:
 
         base = datetime(2026, 3, 30, 10, 0, tzinfo=UTC)
 
-        def _rep(sid: str, t: datetime, metrics: dict[str, float]) -> object:
+        def _rep(sid: str, t: datetime, metrics: dict[str, float]) -> SessionReport:
             return build_report(
                 session_id=sid,
                 project_hash="proj",
