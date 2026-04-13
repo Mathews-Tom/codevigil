@@ -501,3 +501,129 @@ A STALE session that receives a new APPEND returns to ACTIVE with collector stat
 
 Drop in an `InotifySource` or `FSEventsSource` implementing the same `Source` protocol. The aggregator doesn't know or care which source is upstream. Cross-platform selection lives behind a factory function in `watcher.py`. The `PollingSource` remains as a universal fallback.
 
+## Configuration
+
+TOML file at `~/.config/codevigil/config.toml` or passed via `--config`. Falls back to built-in defaults if absent.
+
+```toml
+[watch]
+root = "~/.claude/projects"
+poll_interval = 2.0
+
+[collectors]
+enabled = ["read_edit_ratio", "stop_phrase", "reasoning_loop"]
+
+[collectors.read_edit_ratio]
+window_size = 50
+warn_threshold = 4.0
+critical_threshold = 2.0
+
+[collectors.stop_phrase]
+custom_phrases = [
+    "I'll leave that for now",
+    "that should be sufficient",
+]
+
+[collectors.reasoning_loop]
+warn_threshold = 10.0
+critical_threshold = 20.0
+
+[renderers]
+enabled = ["terminal"]
+
+[report]
+output_format = "json"     # json | markdown
+output_dir = "~/.local/share/codevigil/reports"
+```
+
+### Config Loading Order
+
+Precedence, lowest to highest (later wins for any given key):
+
+1. Built-in defaults (hardcoded in `config.py`)
+2. Config file (`~/.config/codevigil/config.toml` or `--config <path>`)
+3. Environment variables `CODEVIGIL_*`
+4. CLI flags
+
+CLI flags are the highest precedence so a one-off invocation can always override automation-set env vars. This reverses a draft-version ambiguity where env was documented as highest.
+
+### Config Validation
+
+Config loading is fail-loud:
+
+- **Type errors** (e.g. `CODEVIGIL_WARN_THRESHOLD=invalid`) abort startup with a message naming the key, source (env/file/CLI), and expected type. No silent fallback.
+- **Unknown keys** abort with `unknown config key '<name>' at <source>`. Typos must not be eaten.
+- **Unknown collector/renderer names** in `enabled` lists abort with the list of known names. Registry is the source of truth.
+- **Out-of-range values** (e.g. `poll_interval = -1`) abort with the allowed range.
+
+A dry-run `codevigil config check` command prints the fully-resolved effective config with each value's source annotated, so users can audit precedence conflicts.
+
+### Registry Validation
+
+Both `collectors/__init__.py` and `renderers/__init__.py` run a validation pass at import time:
+
+- **Duplicate names.** If two collector classes declare `name = "foo"`, registry construction raises `RegistryCollisionError`. No silent shadow.
+- **Namespacing guidance.** Built-in collectors use bare names (`read_edit_ratio`). Third-party collectors installed via pip-entry-points must use dotted namespaces (`acme.quality`, `astral.lint_compliance`). Registry validation rejects unnamespaced third-party registrations.
+- **Protocol conformance.** Each registered class is checked for `name`, `complexity`, `ingest`, `snapshot`, `reset` at load time, not at first event.
+
+## CLI Modes
+
+### `codevigil watch`
+
+Live monitoring. Tails active sessions, refreshes terminal output every tick.
+
+```bash
+$ codevigil watch
+
+codevigil [experimental thresholds] | parse_confidence: 1.00
+session: a3f7c2d | project: iree-loom | 2m 34s ACTIVE
+──────────────────────────────────────────────────────────────────────
+  read_edit_ratio     5.2   OK     [R:E 5.2 | research:mut 7.1]
+  stop_phrase         0     OK     [0 hits]
+  reasoning_loop      6.4   OK     [6.4/1K tool calls | burst: 2]
+──────────────────────────────────────────────────────────────────────
+
+session: b8e1f9a | project: iree-amdgpu | 14m 12s ACTIVE
+──────────────────────────────────────────────────────────────────────
+  read_edit_ratio     1.8   CRIT   [R:E 1.8 | research:mut 2.3]
+  stop_phrase         3     WARN   [3 hits | last: "should I continue"]
+  reasoning_loop     18.2   WARN   [18.2/1K tool calls | burst: 7]
+──────────────────────────────────────────────────────────────────────
+```
+
+Multi-session display. Most recent/active sessions first. Session state follows the ACTIVE → STALE → EVICTED lifecycle documented under **Watcher Design → Stale Session Policy** (defaults: 5 min to STALE, 35 min total to EVICTED).
+
+### Project Name Resolution
+
+Session files live at `~/.claude/projects/<project-hash>/sessions/<session-id>.jsonl`. Project hashes are not human-readable. The aggregator resolves them via a `ProjectRegistry` that merges three sources in precedence order:
+
+1. User-maintained `~/.config/codevigil/projects.toml` (`{hash = "name"}` pairs).
+2. The first `cwd` field observed in a session's SYSTEM event, stripped to the last path component.
+3. The raw hash (fallback, always available).
+
+The registry is cached per run. Users see a friendly name where possible and can always override via the TOML file. Unresolved hashes surface in watch mode as `project: <hash[:8]>` without triggering a WARN — this is expected state, not an error.
+
+### Experimental Threshold Badge
+
+The `[experimental thresholds]` marker in the header is present whenever any enabled collector has `experimental = true` in its effective config. Users who have explicitly calibrated thresholds (or completed bootstrap) set `experimental = false` and the badge disappears. This keeps the "these are not validated" signal visible without being annoying for users who have tuned their setup.
+
+### `codevigil report <path>`
+
+Batch analysis. Accepts a session file, directory of sessions, or glob pattern. Produces a JSON or Markdown report.
+
+```bash
+$ codevigil report ~/.claude/projects/*/sessions/*.jsonl \
+    --from 2026-03-01 --to 2026-03-31 --format markdown
+```
+
+This is the mode that reproduces stellaraccident's analysis automatically.
+
+### `codevigil export <path>`
+
+Dumps the parsed event stream as newline-delimited JSON for external tools. Useful for piping into `jq`, loading into notebooks, or feeding into future visualization layers.
+
+```bash
+$ codevigil export ~/.claude/projects/abc123/sessions/xyz.jsonl \
+    | jq '.kind == "tool_call"'
+```
+
