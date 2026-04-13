@@ -1,0 +1,58 @@
+# Build sdist + wheel and smoke-install the wheel in a clean venv.
+#
+# This workflow deliberately does NOT publish to PyPI. v0.1 keeps the
+# actual publish step as a manual operator action — the workflow only
+# builds and smoke-tests the artifacts. When PyPI credentials are
+# provisioned for the project, add a `publish` job gated on the tag
+# trigger that runs `uv publish` (or `twine upload`) against the
+# artifact uploaded by `build-and-smoke`. Keep the manual
+# `workflow_dispatch` trigger so operators can still dry-run the build
+# without cutting a tag.
+
+name: release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*.*.*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-and-smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.6.14"
+
+      - name: Set up Python
+        run: uv python install 3.11
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Smoke install wheel in a clean venv
+        run: |
+          python -m venv .smoke
+          .smoke/bin/pip install --upgrade pip
+          .smoke/bin/pip install dist/*.whl
+          .smoke/bin/codevigil --help
+          .smoke/bin/codevigil watch --help
+          .smoke/bin/codevigil report --help
+          .smoke/bin/codevigil export --help
+          .smoke/bin/codevigil config check --help
+
+      - name: Upload dist artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: codevigil-dist
+          path: dist/
+          if-no-files-found: error
