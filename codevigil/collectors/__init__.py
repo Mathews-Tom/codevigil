@@ -18,5 +18,6 @@ COLLECTORS: dict[str, type[Collector]] = {}
 # time; later phases append more user-facing collectors here.
 from codevigil.collectors import parse_health as _parse_health  # noqa: E402,F401
 from codevigil.collectors import read_edit_ratio as _read_edit_ratio  # noqa: E402,F401
+from codevigil.collectors import stop_phrase as _stop_phrase  # noqa: E402,F401
 
 __all__ = ["COLLECTORS", "register_collector"]
