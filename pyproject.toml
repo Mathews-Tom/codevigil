@@ -23,6 +23,9 @@ classifiers = [
 ]
 dependencies = []
 
+[project.optional-dependencies]
+rich = ["rich>=13"]
+
 [project.scripts]
 codevigil = "codevigil.__main__:main"
 
