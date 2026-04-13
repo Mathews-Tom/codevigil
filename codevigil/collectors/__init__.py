@@ -13,4 +13,9 @@ from codevigil.types import Collector
 
 COLLECTORS: dict[str, type[Collector]] = {}
 
+# Import built-in collectors for their registration side effects. The
+# ``parse_health`` collector is always-on and registers itself at import
+# time; later phases append more user-facing collectors here.
+from codevigil.collectors import parse_health as _parse_health  # noqa: E402,F401
+
 __all__ = ["COLLECTORS", "register_collector"]
