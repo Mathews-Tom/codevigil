@@ -627,3 +627,55 @@ $ codevigil export ~/.claude/projects/abc123/sessions/xyz.jsonl \
     | jq '.kind == "tool_call"'
 ```
 
+## Error Taxonomy
+
+Parser, watcher, collectors, and renderers all produce errors. Without a taxonomy, errors silently route to stderr or get swallowed. v0.1 defines a single `CodevigilError` hierarchy and a single **error channel** the aggregator owns:
+
+```python
+class CodevigilError(Exception):
+    level: ErrorLevel        # INFO | WARN | ERROR | CRITICAL
+    source: ErrorSource      # PARSER | WATCHER | COLLECTOR | RENDERER | CONFIG
+    code: str                # stable identifier, e.g. "parser.malformed_line"
+    context: dict[str, Any]  # structured detail for logs and --explain
+```
+
+### Levels and Routes
+
+| Level    | Meaning                                                                                              | Route in `watch` mode                          | Route in `report`/`export`      |
+| -------- | ---------------------------------------------------------------------------------------------------- | ---------------------------------------------- | ------------------------------- |
+| INFO     | Lifecycle event (session start, rotation)                                                            | Log file only                                  | Log file only                   |
+| WARN     | Recoverable drift (single malformed line, unknown schema fingerprint)                                | Dim footer line + log file                     | stderr + log file               |
+| ERROR    | Subsystem degraded (collector stopped ingesting, renderer close failed)                              | Bright footer + log file + exit code remains 0 | stderr + log file + exit code 0 |
+| CRITICAL | Metric integrity compromised (parse_confidence < 0.9, schema fingerprint unknown + parse miss > 20%) | Red banner over affected session + log file    | stderr + log file + exit code 2 |
+
+CRITICAL errors are **always user-visible**. They are not suppressible by log-level config. A user who disables INFO/WARN noise must still see integrity failures.
+
+### Log File
+
+`~/.local/state/codevigil/codevigil.log`, JSON-lines, rotated at 10 MiB × 3 files. Each line is a serialised `CodevigilError` plus a timestamp. The log path is configurable under `[logging]`.
+
+### Error Non-Swallowing Rule
+
+No subsystem catches `CodevigilError` except the aggregator's top-level loop and the renderer's `render_error()` dispatch. Collectors that encounter bad data raise; the aggregator routes. This keeps error flow linear and auditable.
+
+## Privacy Enforcement
+
+Open Question 4 previously said "enforce via code review." A README promise is not enforcement. v0.1 adds a **technical network gate**:
+
+1. **Import allowlist.** `codevigil/__init__.py` installs an import hook that raises `PrivacyViolationError` if any codevigil module (or any module it imports via the codevigil entry points) imports `socket`, `urllib`, `urllib3`, `http.client`, `httpx`, `requests`, `aiohttp`, `ftplib`, `smtplib`, `asyncio` transports, or any `ssl` module. The hook is active in all execution modes.
+2. **Filesystem scope.** The watcher refuses to walk any root outside the user's home directory. The report command refuses to write outside `~/.local/share/codevigil/` or a path explicitly passed via `--output`. A path-traversal check (`Path.resolve().is_relative_to(allowed_root)`) runs on every write.
+3. **CI gate.** A grep-based CI check greps the tree for the same module names and fails the build on any match. Belt-and-suspenders against future contributors unaware of the runtime hook.
+4. **Subprocess audit.** codevigil invokes no subprocesses in v0.1. The CI gate also blocks imports of `subprocess`, `os.system`, `multiprocessing.popen_*`, and `pty`. If a future feature needs a subprocess, the contributor must remove the gate entry in a commit that reviewers will see.
+5. **MCP mode caveat.** `codevigil serve` (v0.2+) necessarily opens a local socket. That feature lives in a separate package (`codevigil-serve`) outside the core import allowlist, so v0.1 users who don't install the serve extra retain the hard no-network guarantee.
+
+This is not paranoia — session JSONL contains verbatim code, prompts, file paths, and sometimes secrets pasted during debugging. The blast radius of a regression that exfiltrates this data is large enough to justify technical enforcement.
+
+## Watch Mode UX Limitations
+
+The zero-dependency constraint collides with the fancy multi-session terminal UI shown in the CLI Modes section. Honest limits:
+
+1. **Full redraw, not diffed.** The terminal renderer clears the screen and redraws on every aggregator tick (default 1 Hz). On fast terminals this is fine; on slow SSH or tmux-over-high-latency links users will see flicker. Documented as a known limitation, not a bug. `rich`-based diff rendering is the v0.2 upgrade path.
+2. **No resize handling in v0.1.** If the terminal is resized mid-session, the next redraw adapts but the previous frame may leave artifacts. `SIGWINCH` handling is v0.2.
+3. **One renderer focus.** The v0.1 watch-mode default enables exactly one renderer: `terminal`. Report-mode defaults to `json_file`. Users who want both in watch mode opt in explicitly via config — composing live terminal output with file-append is valid but users should know they're doing it.
+4. **Scope narrowing.** v0.1 ships with `terminal` and `json_file` renderers. Any "dashboard" or "markdown" renderer is v0.2. This keeps the zero-dep surface honest.
+
