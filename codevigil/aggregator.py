@@ -206,10 +206,11 @@ class SessionAggregator:
         collectors = self._instantiate_collectors(parser)
         now_clock = self._clock()
         now_wall = source_event.timestamp
+        project_hash = self._extract_project_hash(source_event.path, session_id=sid)
         ctx = _SessionContext(
             session_id=sid,
             file_path=source_event.path,
-            project_hash=self._extract_project_hash(source_event.path),
+            project_hash=project_hash,
             parser=parser,
             collectors=collectors,
             first_event_time=now_wall,
@@ -220,19 +221,36 @@ class SessionAggregator:
         return ctx
 
     @staticmethod
-    def _extract_project_hash(path: Path) -> str:
+    def _extract_project_hash(path: Path, *, session_id: str) -> str:
         """Pull the project-hash directory from the canonical path layout.
 
         Layout is ``~/.claude/projects/<project-hash>/sessions/<id>.jsonl``;
-        we walk parents until we find one named ``projects`` and return the
-        directory immediately under it. Anything else falls back to the
-        empty string, which the registry resolves to ``""[:8] == ""``.
+        we walk parents until we find one named ``projects`` and return
+        the directory immediately under it. Anything else logs an INFO
+        record with ``code=aggregator.project_layout_unknown`` and
+        falls back to the empty string. The INFO level distinguishes
+        "valid layout, hash extracted, but project not in registry"
+        (silent — handled downstream by ``project_registry.resolve``)
+        from "path does not follow the documented layout at all"
+        (noisy in the log, so a misconfigured watcher root is visible).
         """
 
         parts = path.parts
         for index, part in enumerate(parts):
             if part == "projects" and index + 1 < len(parts):
                 return parts[index + 1]
+        record(
+            CodevigilError(
+                level=ErrorLevel.INFO,
+                source=ErrorSource.AGGREGATOR,
+                code="aggregator.project_layout_unknown",
+                message=(
+                    f"session path {str(path)!r} does not contain a "
+                    f"'projects/<hash>' segment; project name will be None"
+                ),
+                context={"session_id": session_id, "path": str(path)},
+            )
+        )
         return ""
 
     def _instantiate_collectors(self, parser: SessionParser) -> dict[str, Collector]:
@@ -466,22 +484,50 @@ class SessionAggregator:
 
     def _run_lifecycle_pass(self) -> None:
         now = self._clock()
-        to_evict: list[str] = []
+        to_evict: list[tuple[str, float]] = []
         for sid, ctx in self._sessions.items():
             silence = now - ctx.last_monotonic
             if silence >= self._evict_after:
-                to_evict.append(sid)
+                to_evict.append((sid, silence))
                 continue
             if silence >= self._stale_after and ctx.state is SessionState.ACTIVE:
                 ctx.state = SessionState.STALE
-        for sid in to_evict:
-            self._evict_session(sid)
+        for sid, silence in to_evict:
+            self._evict_session(sid, reason="silence_timeout", silence_seconds=silence)
 
-    def _evict_session(self, session_id: str) -> None:
+    def _evict_session(
+        self,
+        session_id: str,
+        *,
+        reason: str = "source_delete",
+        silence_seconds: float | None = None,
+    ) -> None:
         ctx = self._sessions.pop(session_id, None)
         if ctx is None:
             return
         ctx.state = SessionState.EVICTED
+        # Session churn is operationally interesting: a flapping
+        # watcher or a chatty editor that rolls files every few minutes
+        # shows up as an elevated eviction rate in the INFO log.
+        context: dict[str, Any] = {
+            "session_id": session_id,
+            "reason": reason,
+            "event_count": ctx.event_count,
+            "remaining_sessions": len(self._sessions),
+        }
+        if silence_seconds is not None:
+            context["silence_seconds"] = silence_seconds
+        record(
+            CodevigilError(
+                level=ErrorLevel.INFO,
+                source=ErrorSource.AGGREGATOR,
+                code="aggregator.session_evicted",
+                message=(
+                    f"session {session_id!r} evicted ({reason}); {ctx.event_count} events processed"
+                ),
+                context=context,
+            )
+        )
         self._observe_for_bootstrap(ctx)
         self._reset_collectors(ctx)
 
