@@ -43,3 +43,12 @@ jobs:
 
       - name: Pytest
         run: uv run pytest
+
+  privacy-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run privacy grep
+        run: bash scripts/ci_privacy_grep.sh
