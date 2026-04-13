@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 no changes yet.
 
+## [0.1.1] - 2026-04-13
+
+License-metadata correction. The `0.1.0` wheel published to PyPI declared
+`License :: OSI Approved :: MIT License` in its classifiers but the bundled
+`LICENSE` file was Apache License 2.0 — the file content has been Apache 2.0
+since the first commit of the repository and the MIT references in the docs
+and packaging metadata were a mistake. `0.1.1` reconciles every reference to
+Apache License 2.0 to match the actual `LICENSE` file. No runtime behaviour
+changed.
+
+### Fixed
+
+- `pyproject.toml` classifier: `MIT License` → `Apache Software License`.
+- `README.md` license section: MIT → Apache License 2.0.
+- `docs/design.md` repo notes: MIT → Apache License 2.0.
+
+### Deprecated
+
+- `0.1.0` should not be installed. The wheel is functional but its declared
+  license metadata is internally inconsistent. Users should pin `>=0.1.1`.
+
 ## [0.1.0] - 2026-04-13
 
 Initial alpha release. Stdlib-only runtime, Python 3.11+, zero network egress.
@@ -55,5 +76,6 @@ Initial alpha release. Stdlib-only runtime, Python 3.11+, zero network egress.
 - No `inotify` / `fsevents` integration; the watcher is polling-only.
 - Single-process tick loop. No concurrent rendering or multi-host fan-in.
 
-[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.1.1...HEAD
+[0.1.1]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.0
