@@ -175,3 +175,37 @@ def test_reasoning_loop_critical_threshold_in_configuration_md() -> None:
     assert _doc_contains_default(text, "critical_threshold", expected), (
         f"docs/configuration.md does not document reasoning_loop.critical_threshold = {expected!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# [storage] section (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_storage_enable_persistence_in_configuration_md() -> None:
+    """configuration.md documents storage.enable_persistence = false (TOML lowercase)."""
+    text = _load(_CONFIGURATION_MD)
+    # CONFIG_DEFAULTS stores Python False; the doc uses TOML/lowercase "false".
+    # Check for the TOML representation rather than the Python repr.
+    assert "enable_persistence" in text, "docs/configuration.md does not mention enable_persistence"
+    assert "false" in text.lower(), (
+        "docs/configuration.md does not document enable_persistence default as false"
+    )
+
+
+def test_storage_min_observation_days_in_configuration_md() -> None:
+    """configuration.md documents storage.min_observation_days = 1."""
+    text = _load(_CONFIGURATION_MD)
+    storage_cfg = CONFIG_DEFAULTS["storage"]
+    expected = storage_cfg["min_observation_days"]
+    assert _doc_contains_default(text, "min_observation_days", expected), (
+        f"docs/configuration.md does not document storage.min_observation_days = {expected!r}"
+    )
+
+
+def test_configuration_md_mentions_storage_section() -> None:
+    """configuration.md has a [storage] section heading."""
+    text = _load(_CONFIGURATION_MD)
+    assert "[storage]" in text or "## `[storage]`" in text, (
+        "docs/configuration.md does not contain a [storage] section"
+    )
