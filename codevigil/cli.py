@@ -9,6 +9,15 @@ descendant of ``Path.home()``, otherwise a ``PrivacyViolationError`` is
 raised and the command exits ``2``. Markdown output is deterministic
 under identical input — sessions sorted by id, metric rows by name, no
 wall-clock timestamps — so golden-file tests are possible.
+
+The global ``--explain`` flag surfaces ``stop_phrase`` collector
+``intent`` annotations in the relevant output channels. It is plumbed as
+a bool that ``watch``, ``report``, and ``export`` each read directly:
+``watch`` annotates the terminal metric label, ``report`` appends intent
+text to the markdown label column and keeps ``recent_hits`` intent in
+the JSON payload, and ``export`` passes through the full event payload.
+Without ``--explain`` the JSON report strips intent fields from
+``recent_hits`` for symmetry with the watcher's non-explain output.
 """
 
 from __future__ import annotations
@@ -52,6 +61,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=Path,
         default=None,
         help="Path to a TOML config file. Overrides ~/.config/codevigil/config.toml.",
+    )
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        default=False,
+        help="Surface stop_phrase intent annotations in watch/report/export output.",
     )
 
     sub = parser.add_subparsers(dest="command", required=False)
@@ -200,6 +215,7 @@ def _run_watch(args: argparse.Namespace) -> int:
 
     show_badge = _any_experimental_enabled(cfg)
     renderer = TerminalRenderer(show_experimental_badge=show_badge)
+    explain = bool(args.explain)
 
     _install_sigint_handler()
     tick_interval = float(watch_cfg["tick_interval"])
@@ -213,7 +229,8 @@ def _run_watch(args: argparse.Namespace) -> int:
                 pairs = []
             renderer.begin_tick()
             for meta, snapshots in pairs:
-                renderer.render(snapshots, meta)
+                adjusted = _apply_explain_to_snapshots(snapshots, explain=explain)
+                renderer.render(adjusted, meta)
             renderer.end_tick()
             if _shutdown_requested:
                 break
@@ -238,6 +255,60 @@ def _any_experimental_enabled(cfg: dict[str, Any]) -> bool:
         if isinstance(section, dict) and section.get("experimental") is True:
             return True
     return False
+
+
+def _apply_explain_to_snapshots(
+    snapshots: list[MetricSnapshot],
+    *,
+    explain: bool,
+) -> list[MetricSnapshot]:
+    """Append stop_phrase intent annotations to the label when ``--explain``.
+
+    Other collectors pass through unchanged. The renderer's label slot is
+    the only surface that reaches the terminal body, and the design
+    calls for intent to appear alongside the matched phrase, so we
+    thread it in here rather than teaching the renderer a new hook.
+    """
+
+    if not explain:
+        return snapshots
+    out: list[MetricSnapshot] = []
+    for snap in snapshots:
+        annotation = _intent_annotation(snap)
+        if annotation is None:
+            out.append(snap)
+            continue
+        label = f"{snap.label} | intent: {annotation}" if snap.label else f"intent: {annotation}"
+        out.append(
+            MetricSnapshot(
+                name=snap.name,
+                value=snap.value,
+                label=label,
+                severity=snap.severity,
+                detail=snap.detail,
+            )
+        )
+    return out
+
+
+def _intent_annotation(snap: MetricSnapshot) -> str | None:
+    """Pull the most recent ``intent`` from a stop_phrase snapshot, if any."""
+
+    if snap.name != "stop_phrase":
+        return None
+    detail = snap.detail
+    if not isinstance(detail, dict):
+        return None
+    recent = detail.get("recent_hits")
+    if not isinstance(recent, list) or not recent:
+        return None
+    last = recent[-1]
+    if not isinstance(last, dict):
+        return None
+    intent = last.get("intent")
+    if isinstance(intent, str) and intent:
+        return intent
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -294,12 +365,13 @@ def _run_report(args: argparse.Namespace) -> int:
             exit_code = 2
 
     output_dir.mkdir(parents=True, exist_ok=True)
+    explain = bool(args.explain)
     if args.format == "json":
-        payload = _render_report_json(reports)
+        payload = _render_report_json(reports, explain=explain)
         _write_report(output_dir / "report.json", payload)
         sys.stdout.write(payload)
     else:
-        payload = _render_report_markdown(reports)
+        payload = _render_report_markdown(reports, explain=explain)
         _write_report(output_dir / "report.md", payload)
         sys.stdout.write(payload)
     sys.stdout.flush()
@@ -482,7 +554,7 @@ def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
     )
 
 
-def _render_report_json(reports: list[_SessionReport]) -> str:
+def _render_report_json(reports: list[_SessionReport], *, explain: bool) -> str:
     out_lines: list[str] = []
     for report in sorted(reports, key=lambda r: r.session_id):
         record: dict[str, Any] = {
@@ -497,13 +569,16 @@ def _render_report_json(reports: list[_SessionReport]) -> str:
             ),
             "event_count": report.event_count,
             "parse_confidence": report.parse_confidence,
-            "metrics": [_metric_to_dict(m) for m in sorted(report.metrics, key=lambda m: m.name)],
+            "metrics": [
+                _metric_to_dict(m, explain=explain)
+                for m in sorted(report.metrics, key=lambda m: m.name)
+            ],
         }
         out_lines.append(json.dumps(record, sort_keys=True, separators=(",", ":")))
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
 
-def _render_report_markdown(reports: list[_SessionReport]) -> str:
+def _render_report_markdown(reports: list[_SessionReport], *, explain: bool) -> str:
     """Render a deterministic markdown summary.
 
     Output is stable under identical input: sessions are sorted by id,
@@ -522,9 +597,14 @@ def _render_report_markdown(reports: list[_SessionReport]) -> str:
         lines.append("| metric | value | severity | label |")
         lines.append("| --- | --- | --- | --- |")
         for metric in sorted(report.metrics, key=lambda m: m.name):
+            label = metric.label
+            if explain:
+                annotation = _intent_annotation(metric)
+                if annotation is not None:
+                    label = f"{label} | intent: {annotation}" if label else f"intent: {annotation}"
             lines.append(
                 f"| {metric.name} | {metric.value:.2f} | "
-                f"{_severity_word(metric.severity)} | {metric.label} |"
+                f"{_severity_word(metric.severity)} | {label} |"
             )
         lines.append("")
     return "\n".join(lines)
@@ -538,13 +618,21 @@ def _severity_word(severity: Severity) -> str:
     }[severity]
 
 
-def _metric_to_dict(metric: MetricSnapshot) -> dict[str, Any]:
+def _metric_to_dict(metric: MetricSnapshot, *, explain: bool) -> dict[str, Any]:
+    detail = metric.detail
+    if not explain and isinstance(detail, dict) and "recent_hits" in detail:
+        stripped_recent = [
+            {k: v for k, v in hit.items() if k != "intent"}
+            for hit in detail["recent_hits"]
+            if isinstance(hit, dict)
+        ]
+        detail = {**detail, "recent_hits": stripped_recent}
     return {
         "name": metric.name,
         "value": metric.value,
         "label": metric.label,
         "severity": metric.severity.value,
-        "detail": metric.detail,
+        "detail": detail,
     }
 
 
@@ -573,11 +661,12 @@ def _run_export(args: argparse.Namespace) -> int:
     pipe it into ``jq`` and compute their own aggregates.
     """
 
+    explain = bool(args.explain)
     for path in _expand_path_argument(args.path):
         try:
             with path.open("r", encoding="utf-8", errors="replace") as handle:
                 for event in parse_session(handle, session_id=path.stem):
-                    sys.stdout.write(_event_to_ndjson_line(event))
+                    sys.stdout.write(_event_to_ndjson_line(event, explain=explain))
                     sys.stdout.write("\n")
         except OSError:
             continue
@@ -585,12 +674,15 @@ def _run_export(args: argparse.Namespace) -> int:
     return 0
 
 
-def _event_to_ndjson_line(event: Event) -> str:
+def _event_to_ndjson_line(event: Event, *, explain: bool) -> str:
+    payload = dict(event.payload)
+    if not explain and "intent" in payload:
+        payload.pop("intent", None)
     record = {
         "timestamp": event.timestamp.isoformat(),
         "session_id": event.session_id,
         "kind": event.kind.value,
-        "payload": dict(event.payload),
+        "payload": payload,
     }
     return json.dumps(record, sort_keys=True, separators=(",", ":"))
 
