@@ -83,7 +83,9 @@ def test_bare_invocation_prints_version(
 def test_unwired_command_reports_not_yet_implemented(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    exit_code = main(["watch"])
+    """``report`` and ``export`` wiring lands in follow-up changes."""
+
+    exit_code = main(["report"])
     assert exit_code == 2
     err = capsys.readouterr().err
     assert "not wired yet" in err
