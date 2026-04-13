@@ -48,6 +48,20 @@ from codevigil.types import MetricSnapshot
 _PARSE_HEALTH_NAME: str = "parse_health"
 _STATE_SCHEMA_VERSION: int = 1
 
+# Metrics where a LOW value means the session is unhealthy (the inverse
+# of the default assumption). For these the bootstrap manager picks
+# p20/p5 instead of p80/p95 — the "rare bad session" sits in the bottom
+# tail of the distribution, not the top — and clamps the derived warn
+# threshold to ``max(p20, warn_cap)`` and critical to
+# ``min(p5, critical_cap)`` so the hard-coded fallback forms a
+# looseness floor rather than a strictness ceiling.
+#
+# Keyed by the ``"{collector_name}.{metric_name}"`` form that the
+# distribution table uses. ``read_edit_ratio`` is the only built-in
+# low-is-worse metric; third-party collectors that share the pattern
+# add themselves by mutating this set at import time.
+LOWER_IS_WORSE_METRICS: set[str] = {"read_edit_ratio.read_edit_ratio"}
+
 
 @dataclass(slots=True)
 class BootstrapState:
@@ -232,8 +246,28 @@ class BootstrapManager:
     def finalize_if_ready(self) -> bool:
         """Derive thresholds and persist if the window is full.
 
-        Returns True on the single tick where completion flips from False
-        to True so the aggregator can emit the INFO transition record.
+        Clamp semantics. For high-is-worse metrics the hard cap from
+        config acts as a **strictness ceiling**: the derived warn is
+        ``min(p80, warn_cap)`` and the derived critical is
+        ``max(p95, critical_cap)``. Bootstrap can tighten the
+        threshold toward a user's observed normal, but never loosen
+        it past the built-in fallback.
+
+        For low-is-worse metrics (see :data:`LOWER_IS_WORSE_METRICS`)
+        the hard cap is a **looseness floor**: the derived warn is
+        ``max(p20, warn_cap)`` and the derived critical is
+        ``min(p5, critical_cap)``. Bootstrap can relax the threshold
+        toward the user's observed normal (useful for workflows that
+        legitimately run a low read/edit ratio), but never strictify
+        past the built-in fallback.
+
+        In both cases a user who explicitly sets a threshold in their
+        config is guaranteed the bootstrap process cannot move it in
+        the direction that would make their setting meaningless.
+
+        Returns True on the single tick where completion flips from
+        False to True so the aggregator can emit the INFO transition
+        record.
         """
 
         if self._state.completed:
@@ -241,20 +275,14 @@ class BootstrapManager:
         if self._state.sessions_observed < self._target:
             self.save()
             return False
-        derived: dict[str, tuple[float, float]] = {}
-        for key, values in self._state.distributions.items():
-            warn_p80, critical_p95 = _compute_quantiles(values)
-            cap = self._hard_caps.get(key)
-            if cap is not None:
-                warn_cap, critical_cap = cap
-                # Spec: warn clamps to <= warn_cap, critical clamps to
-                # >= critical_cap. This is the high-value-is-worse
-                # semantic; for low-value-is-worse collectors (e.g.
-                # read_edit_ratio) the clamp direction is preserved so
-                # the hard-coded fallback always wins as the boundary.
-                warn_p80 = min(warn_p80, float(warn_cap))
-                critical_p95 = max(critical_p95, float(critical_cap))
-            derived[key] = (warn_p80, critical_p95)
+        derived: dict[str, tuple[float, float]] = {
+            key: _derive_thresholds(
+                values,
+                cap=self._hard_caps.get(key),
+                lower_is_worse=key in LOWER_IS_WORSE_METRICS,
+            )
+            for key, values in self._state.distributions.items()
+        }
         self._state.derived_thresholds = derived
         self._state.completed = True
         self.save()
@@ -262,7 +290,7 @@ class BootstrapManager:
 
 
 def _compute_quantiles(values: list[float]) -> tuple[float, float]:
-    """Return the (p80, p95) pair from ``values``.
+    """Return the (p80, p95) pair from ``values`` (high-is-worse).
 
     ``statistics.quantiles`` requires at least two data points; for
     shorter distributions we fall back to sensible scalar summaries so
@@ -281,4 +309,50 @@ def _compute_quantiles(values: list[float]) -> tuple[float, float]:
     return (float(ventiles[15]), float(ventiles[18]))
 
 
-__all__ = ["BootstrapManager", "BootstrapState"]
+def _compute_lower_quantiles(values: list[float]) -> tuple[float, float]:
+    """Return the (p20, p5) pair from ``values`` (low-is-worse).
+
+    Mirror of :func:`_compute_quantiles` for metrics where a low value
+    means a bad session. p20 sits at ventile index 3, p5 at index 0.
+    """
+
+    if not values:
+        return (0.0, 0.0)
+    if len(values) == 1:
+        only = float(values[0])
+        return (only, only)
+    ventiles = statistics.quantiles(values, n=20, method="inclusive")
+    return (float(ventiles[3]), float(ventiles[0]))
+
+
+def _derive_thresholds(
+    values: list[float],
+    *,
+    cap: tuple[float, float] | None,
+    lower_is_worse: bool,
+) -> tuple[float, float]:
+    """Derive (warn, critical) for one metric distribution.
+
+    For high-is-worse metrics we pick (p80, p95) and clamp the warn
+    downward and the critical upward against the hard cap — the cap
+    is a strictness ceiling. For low-is-worse metrics we pick
+    (p20, p5) and clamp warn upward, critical downward — the cap is
+    a looseness floor. See :meth:`BootstrapManager.finalize_if_ready`
+    for the motivation.
+    """
+
+    if lower_is_worse:
+        warn, critical = _compute_lower_quantiles(values)
+        if cap is None:
+            return (warn, critical)
+        warn_cap, critical_cap = cap
+        return (max(warn, float(warn_cap)), min(critical, float(critical_cap)))
+
+    warn, critical = _compute_quantiles(values)
+    if cap is None:
+        return (warn, critical)
+    warn_cap, critical_cap = cap
+    return (min(warn, float(warn_cap)), max(critical, float(critical_cap)))
+
+
+__all__ = ["LOWER_IS_WORSE_METRICS", "BootstrapManager", "BootstrapState"]
