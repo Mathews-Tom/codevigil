@@ -1,0 +1,46 @@
+[project]
+name = "codevigil"
+version = "0.1.0"
+description = "Local, privacy-preserving observability for Claude Code sessions."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "codevigil contributors" }]
+keywords = ["claude", "observability", "cli", "local"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX",
+    "Operating System :: MacOS :: MacOS X",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Quality Assurance",
+]
+dependencies = []
+
+[project.scripts]
+codevigil = "codevigil.__main__:main"
+
+[project.urls]
+Homepage = "https://github.com/Mathews-Tom/codevigil"
+Issues = "https://github.com/Mathews-Tom/codevigil/issues"
+
+[dependency-groups]
+dev = [
+    "mypy>=1.11",
+    "pytest>=8.3",
+    "ruff>=0.6.0",
+]
+
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["codevigil"]
+
+[tool.hatch.build.targets.sdist]
+include = ["codevigil", "README.md", "LICENSE", "pyproject.toml"]
