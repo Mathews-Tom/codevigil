@@ -147,6 +147,21 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("path", type=str, help="File, directory, or glob pattern.")
 
+    # history — all arguments are parsed manually in _run_history because
+    # argparse subparsers conflict with the ``codevigil history <SESSION_ID>``
+    # positional-as-detail-view pattern. We accept REMAINDER and dispatch
+    # manually based on the first positional word.
+    history_parser = sub.add_parser(
+        "history",
+        help="Retrospective analysis of stored session reports.",
+        # Disable abbreviated prefix matching so 'list' does not match 'l'.
+    )
+    history_parser.add_argument(
+        "history_args",
+        nargs=argparse.REMAINDER,
+        help=argparse.SUPPRESS,
+    )
+
     return parser
 
 
@@ -180,6 +195,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_report(args)
     if args.command == "export":
         return _run_export(args)
+    if args.command == "history":
+        return _run_history(args)
 
     parser.error(f"unknown command {args.command!r}")
     return 2  # pragma: no cover - parser.error raises SystemExit
@@ -863,6 +880,107 @@ def _write_report(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write(payload)
+
+
+# ---------------------------------------------------------------------------
+# history
+# ---------------------------------------------------------------------------
+
+
+def _run_history(args: argparse.Namespace) -> int:
+    """Dispatch ``codevigil history`` subcommands.
+
+    History arguments are parsed manually because argparse subparsers
+    conflict with the ``codevigil history <SESSION_ID>`` form (a bare
+    session id would be rejected as an unknown subcommand choice).
+    ``history_args`` is a REMAINDER list; we dispatch on the first element.
+
+    Valid forms::
+
+        codevigil history list [--project P] [--since D] [--until D]
+                               [--severity S] [--model M] [--permission-mode M]
+        codevigil history <SESSION_ID>
+        codevigil history diff A B
+        codevigil history heatmap <SESSION_ID>
+    """
+    from codevigil.history.detail_cmd import run_detail
+    from codevigil.history.diff_cmd import run_diff
+    from codevigil.history.filters import parse_date_arg
+    from codevigil.history.heatmap_cmd import run_heatmap
+    from codevigil.history.list_cmd import run_list
+
+    remainder: list[str] = list(getattr(args, "history_args", []) or [])
+
+    if not remainder:
+        sys.stderr.write(
+            "usage: codevigil history list [OPTIONS]\n"
+            "       codevigil history <SESSION_ID>\n"
+            "       codevigil history diff A B\n"
+            "       codevigil history heatmap <SESSION_ID>\n"
+        )
+        return 2
+
+    subcmd = remainder[0]
+    rest = remainder[1:]
+
+    if subcmd == "list":
+        return _run_history_list(rest, run_list=run_list, parse_date_arg=parse_date_arg)
+
+    if subcmd == "diff":
+        if len(rest) < 2:
+            sys.stderr.write("usage: codevigil history diff <SESSION_A> <SESSION_B>\n")
+            return 2
+        return run_diff(rest[0], rest[1])
+
+    if subcmd == "heatmap":
+        if not rest:
+            sys.stderr.write("usage: codevigil history heatmap <SESSION_ID>\n")
+            return 2
+        return run_heatmap(rest[0])
+
+    # Any other first token is treated as a session id for the detail view.
+    return run_detail(subcmd)
+
+
+def _run_history_list(
+    argv: list[str],
+    *,
+    run_list: Any,
+    parse_date_arg: Any,
+) -> int:
+    """Parse ``history list`` flags and invoke ``run_list``."""
+    p = argparse.ArgumentParser(prog="codevigil history list", add_help=True)
+    p.add_argument("--project", default=None)
+    p.add_argument("--since", dest="since", type=str, default=None, metavar="YYYY-MM-DD")
+    p.add_argument("--until", dest="until", type=str, default=None, metavar="YYYY-MM-DD")
+    p.add_argument("--severity", choices=("ok", "warn", "crit"), default=None)
+    p.add_argument("--model", default=None)
+    p.add_argument("--permission-mode", dest="permission_mode", default=None)
+    parsed = p.parse_args(argv)
+
+    since_date = None
+    until_date = None
+    if parsed.since is not None:
+        try:
+            since_date = parse_date_arg(parsed.since)
+        except ValueError as exc:
+            sys.stderr.write(f"CRITICAL: history.bad_date: {exc}\n")
+            return 2
+    if parsed.until is not None:
+        try:
+            until_date = parse_date_arg(parsed.until)
+        except ValueError as exc:
+            sys.stderr.write(f"CRITICAL: history.bad_date: {exc}\n")
+            return 2
+
+    return run_list(  # type: ignore[no-any-return]
+        project=parsed.project,
+        since=since_date,
+        until=until_date,
+        severity=parsed.severity,
+        model=parsed.model,
+        permission_mode=parsed.permission_mode,
+    )
 
 
 # ---------------------------------------------------------------------------
