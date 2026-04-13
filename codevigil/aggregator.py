@@ -243,6 +243,12 @@ class SessionAggregator:
         collector and the validator already refuses configs that try to
         turn it off, but enforcing it here too means a buggy code path that
         bypasses the validator still cannot drop the integrity collector.
+
+        Each collector receives its per-collector config subtree
+        (``config["collectors"][name]``) as the first positional
+        argument when the constructor accepts one. Collectors that
+        ignore their config still work — they fall back to built-in
+        defaults via ``_default_config()``.
         """
 
         instances: dict[str, Collector] = {}
@@ -254,9 +260,20 @@ class SessionAggregator:
                 continue
             if name in self._registry:
                 names.append(name)
+        collectors_cfg: dict[str, Any] = self._config.get("collectors", {})
         for name in names:
-            cls = self._registry[name]
-            instance = cls()
+            # Built-in collectors accept an optional ``config`` dict as
+            # their first positional argument. Test fixtures register
+            # stub classes with zero-arg constructors, so we only pass
+            # config through when the user's resolved config actually
+            # has an entry for this collector name; otherwise we fall
+            # back to the argless call and let the class use its own
+            # defaults. The Collector protocol doesn't describe the
+            # constructor shape, so the call is cast to Any for the
+            # type checker only.
+            factory: Any = self._registry[name]
+            per_collector_cfg = collectors_cfg.get(name)
+            instance = factory(per_collector_cfg) if per_collector_cfg is not None else factory()
             bind = getattr(instance, "bind_stats", None)
             if callable(bind):
                 bind(parser.stats)
