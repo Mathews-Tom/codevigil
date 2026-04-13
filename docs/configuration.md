@@ -138,6 +138,16 @@ Renderer names recognised by the v0.1 registry: `terminal`, `json_file`. Watch m
 | `sessions`   | `int` | `10`                                      | Number of sessions the bootstrap manager observes before computing personalised thresholds. While inside the window, every collector snapshot has its severity clamped to OK. Range: `[1, 1000]`. |
 | `state_path` | `str` | `~/.local/state/codevigil/bootstrap.json` | On-disk persistence path for the bootstrap manager. Survives process restarts; corrupt files trigger a re-bootstrap with a single WARN.                                                           |
 
+### How user-supplied thresholds interact with bootstrap
+
+When you set `warn_threshold` or `critical_threshold` in your config file, those values act as **calibration bounds**, not as unconditional preserved values.
+
+For **high-is-worse** metrics (`stop_phrase`, `reasoning_loop`): the hard cap is a **strictness ceiling**. Bootstrap picks the p80 (WARN) and p95 (CRITICAL) of your local session distribution, then applies `min(p80, warn_cap)` and `max(p95, critical_cap)`. Bootstrap can tighten a threshold toward your observed normal, but can never loosen it past your configured cap.
+
+For **low-is-worse** metrics (`read_edit_ratio`): the hard cap is a **looseness floor**. Bootstrap picks the p20 (WARN) and p5 (CRITICAL) of your local distribution, then applies `max(p20, warn_cap)` and `min(p5, critical_cap)`. Bootstrap can relax toward your observed normal, but can never strictify past your configured cap.
+
+The practical implication: a user who sets `warn_threshold = 5.0` for `read_edit_ratio` will never see bootstrap move the warning trigger above `5.0`, even if their sessions routinely produce ratios of `3.0`. The explicit threshold acts as the looseness floor. This is intentional — user-supplied values signal intent, and bootstrap must respect the intent's direction.
+
 ## Environment variables
 
 Only the keys in this map can be overridden via the environment. Every other key must be set in TOML or on the CLI. The bindings are kept small on purpose — a typo in a `CODEVIGIL_*` variable that is not in this list is a no-op, not a silent override.
