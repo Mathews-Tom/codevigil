@@ -79,6 +79,22 @@ pip install .
 
 For a full development environment with the lint, type-check, and test toolchain, use `uv sync --dev` instead — see the [Contributing](#contributing) section below.
 
+## Optional extras
+
+### `[rich]` — enhanced terminal output for `history` commands
+
+The `history` subcommand family works without any extras (plain Markdown output). Install the `[rich]` extra to enable colored panels and formatted tables in `history <SESSION_ID>` and `history heatmap`:
+
+```bash
+uv tool install 'codevigil[rich]'
+# or, if codevigil is already installed:
+uv add 'codevigil[rich]'
+```
+
+`rich>=13` brings its own minimal dependency tree (markdown-it-py, mdurl, pygments). The approximate installed size is around 2–3 MB on disk. The exact figure depends on the platform and whether pygments is already present in the environment.
+
+Without `[rich]`, `history list`, `history <SESSION_ID>`, and `history diff` all work normally and produce Markdown output. `history heatmap` exits 2 with an install hint when `rich` is absent.
+
 ## Verifying the install is genuine
 
 codevigil ships with no runtime dependencies, so the wheel install is exactly two files plus a sdist tarball:

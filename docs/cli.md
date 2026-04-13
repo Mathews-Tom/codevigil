@@ -15,12 +15,13 @@ These apply to every subcommand and must appear before the subcommand name on th
 
 ## Subcommands
 
-| Subcommand                      | Purpose                                                             |
-| ------------------------------- | ------------------------------------------------------------------- |
-| [`config check`](#config-check) | Resolve the effective config and print each value with its source.  |
-| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard. |
-| [`report`](#report)             | Batch analysis over one or more session files.                      |
-| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                           |
+| Subcommand                      | Purpose                                                                    |
+| ------------------------------- | -------------------------------------------------------------------------- |
+| [`config check`](#config-check) | Resolve the effective config and print each value with its source.         |
+| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard.        |
+| [`report`](#report)             | Batch analysis over one or more session files.                             |
+| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                  |
+| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap).|
 
 ---
 
@@ -361,6 +362,130 @@ codevigil export ~/.claude/projects/abc/sessions/ > all-events.ndjson
 ```
 
 The `--explain` flag is plumbed through `export` for forward compatibility but currently does not change the output — the parser does not surface `intent` annotations on raw events. A future parser change can flow into export without re-wiring the dispatcher.
+
+---
+
+## `history`
+
+```text
+codevigil history list [OPTIONS]
+codevigil history <SESSION_ID>
+codevigil history diff <SESSION_A> <SESSION_B>
+codevigil history heatmap <SESSION_ID>
+```
+
+Retrospective, post-mortem view of stored session reports from the `SessionStore` (`$XDG_STATE_HOME/codevigil/sessions/`). Reads session reports written by the aggregator when `storage.enable_persistence = true`. All `history` subcommands are read-only and make no network calls.
+
+### `history list`
+
+Lists all stored sessions in a compact Markdown table. Reads all sessions from the store in a single pass — no per-row disk reads after the initial enumeration.
+
+**Columns:** `session_id` (short, 12-char), `project`, `started_at`, `duration`, `severity`, `model`, `permission_mode`, `metrics_summary` (top-2 metrics by absolute value).
+
+**Flags:**
+
+| Flag | Description |
+| ---- | ----------- |
+| `--project NAME` | Filter by project name or project hash. |
+| `--since YYYY-MM-DD` | Include sessions whose `started_at` is on or after this date (inclusive). |
+| `--until YYYY-MM-DD` | Include sessions whose `started_at` is on or before this date (inclusive). |
+| `--severity {ok,warn,crit}` | Filter by worst-metric severity across all metrics in the session. |
+| `--model MODEL` | Filter by model identifier (exact match). |
+| `--permission-mode MODE` | Filter by permission mode (exact match). |
+
+**Severity classification** maps metric values to labels using the same thresholds as the watch-mode collectors:
+
+| Metric | Warn threshold | Crit threshold | Scale |
+| ------ | -------------- | -------------- | ----- |
+| `read_edit_ratio` | < 4.0 | < 2.0 | inverted (lower is worse) |
+| `stop_phrase` | >= 1.0 | >= 3.0 | normal (higher is worse) |
+| `reasoning_loop` | >= 10.0 | >= 20.0 | normal |
+| `parse_health` | < 0.9 | < 0.9 | inverted |
+
+**Examples:**
+
+```bash
+# List all stored sessions
+codevigil history list
+
+# List sessions from a specific project since a date
+codevigil history list --project my-project --since 2026-04-01
+
+# List only sessions classified as critical
+codevigil history list --severity crit
+
+# Filter by model
+codevigil history list --model gpt-4.1
+```
+
+**Exit codes:**
+
+- `0` — success (even if the store is empty or no sessions match the filters)
+- `2` — invalid date format for `--since` or `--until`
+
+### `history <SESSION_ID>`
+
+Renders a single stored session in detail. With `rich` installed the output uses `rich.panel.Panel` and `rich.table.Table` for visual layout. Without `rich`, the output is plain Markdown.
+
+**Output sections:**
+
+1. **Header block** — session id, project, model, permission_mode, started_at, duration, event count, parse confidence, final severity.
+2. **Metrics table** — one row per metric: name, value (4 decimal places), severity label.
+3. **Stop-phrase context snippets** — when present in the session detail.
+
+**Examples:**
+
+```bash
+codevigil history agent-abc123def456ghi
+```
+
+**Exit codes:**
+
+- `0` — session found and rendered
+- `1` — session id not found in the store
+
+### `history diff <SESSION_A> <SESSION_B>`
+
+Renders a side-by-side Markdown comparison of two sessions. Aligns metric name sequences using `difflib.SequenceMatcher` (LCS). Output is deterministic. This subcommand does not require the `rich` extra.
+
+**Output sections:**
+
+1. **Header comparison** — session_id, project, model, permission_mode, started_at, duration (with signed delta), event count, severity.
+2. **Metric diff table** — one row per aligned metric pair: name, value A, value B, delta (B - A) with sign. Metrics present in only one session appear with `_(absent)_`.
+
+**Examples:**
+
+```bash
+codevigil history diff agent-abc123 agent-def456
+```
+
+**Exit codes:**
+
+- `0` — both sessions found and diffed
+- `1` — one or both sessions not found in the store
+- `2` — usage error (fewer than two session ids provided)
+
+### `history heatmap <SESSION_ID>`
+
+Renders a metric x severity matrix for a single session using `rich.table.Table`. Each row is one metric; columns are `ok`, `warn`, and `crit`; the cell in the session's actual severity bucket shows the metric value, other cells show `—`.
+
+Requires the `rich` optional extra. Without it, prints an install hint and exits 2.
+
+**Examples:**
+
+```bash
+# With rich installed
+codevigil history heatmap agent-abc123
+
+# Install rich if needed
+uv add 'codevigil[rich]'
+```
+
+**Exit codes:**
+
+- `0` — success
+- `1` — session id not found in the store
+- `2` — `rich` extra not installed
 
 ---
 
