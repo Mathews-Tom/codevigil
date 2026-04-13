@@ -85,6 +85,14 @@ class FileCursor:
     ``offset`` is the byte offset of the next unread byte; ``pending``
     carries bytes read past the last newline that have not yet completed a
     line. A line is only emitted when its terminating ``\\n`` arrives.
+
+    ``large_file_warned`` stays True for the lifetime of the cursor.
+    The cursor itself is replaced on every ROTATE and TRUNCATE (see
+    ``_handle_path``), so a file that shrinks and spikes again
+    naturally gets a fresh cursor with ``large_file_warned=False`` and
+    the next oversize growth re-warns. High-water-mark semantics on
+    steadily-growing files would be too noisy and was deliberately
+    rejected.
     """
 
     path: Path

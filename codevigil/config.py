@@ -46,6 +46,12 @@ CONFIG_DEFAULTS: dict[str, Any] = {
             # The validator refuses any layer that flips this flag to
             # false — see ``_validate_parse_health_undisableable``.
             "enabled": True,
+            # Rolling parse_confidence below this threshold flips the
+            # collector to CRITICAL once its internal window has
+            # accumulated enough lines. Kept tunable so projects with
+            # known-noisy wire formats can relax the alarm without
+            # disabling the integrity signal entirely.
+            "critical_threshold": 0.9,
         },
         "read_edit_ratio": {
             "window_size": 50,
@@ -53,6 +59,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
             "critical_threshold": 2.0,
             "blind_edit_window": 20,
             "blind_edit_confidence_floor": 0.95,
+            "min_events_for_severity": 10,
             "experimental": True,
         },
         "stop_phrase": {
@@ -64,6 +71,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "reasoning_loop": {
             "warn_threshold": 10.0,
             "critical_threshold": 20.0,
+            "min_tool_calls_for_severity": 20,
             "experimental": True,
         },
     },
@@ -642,6 +650,27 @@ def _validate_resolved(values: dict[str, Any]) -> None:
         "bootstrap.sessions",
         minimum=1,
         maximum=1_000,
+        kind="int",
+    )
+    _validate_range(
+        values,
+        "collectors.parse_health.critical_threshold",
+        minimum=0.0,
+        maximum=1.0,
+        kind="float",
+    )
+    _validate_range(
+        values,
+        "collectors.reasoning_loop.min_tool_calls_for_severity",
+        minimum=0,
+        maximum=100_000,
+        kind="int",
+    )
+    _validate_range(
+        values,
+        "collectors.read_edit_ratio.min_events_for_severity",
+        minimum=0,
+        maximum=100_000,
         kind="int",
     )
 

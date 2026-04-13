@@ -34,8 +34,8 @@ critical_threshold = 0.0000
 
 [collectors.stop_phrase]
 # derived from 5 session(s)
-warn_threshold = 0.2500
-critical_threshold = 1.0000
+warn_threshold = 0.2000
+critical_threshold = 0.8000
 """
 
 

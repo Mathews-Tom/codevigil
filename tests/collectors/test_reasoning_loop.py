@@ -31,6 +31,7 @@ def _make(**overrides: Any) -> ReasoningLoopCollector:
     cfg: dict[str, Any] = {
         "warn_threshold": 10.0,
         "critical_threshold": 20.0,
+        "min_tool_calls_for_severity": 20,
         "experimental": True,
     }
     cfg.update(overrides)

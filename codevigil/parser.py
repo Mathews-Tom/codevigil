@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -139,13 +140,31 @@ def _seed_known_fingerprints() -> None:
 
 _seed_known_fingerprints()
 
-# Number of leading lines from which to sample fingerprints.
-_FINGERPRINT_SAMPLE_SIZE: int = 10
+# Number of leading lines to fingerprint back-to-back at the start of
+# every session, so the common case (Claude Code schema change between
+# releases) fires within the first handful of lines. After this initial
+# burst the parser continues to sample every ``_FINGERPRINT_RESAMPLE_STRIDE``
+# lines forever so mid-session schema drift — a hypothetical rolling
+# deploy that swaps the writer halfway through a session — is still
+# caught. The unknown-fingerprint warning fires once per unique
+# fingerprint, not once per session, so each distinct drift shape is
+# reported exactly once.
+_FINGERPRINT_INITIAL_BURST: int = 10
+_FINGERPRINT_RESAMPLE_STRIDE: int = 500
 
 
 # ---------------------------------------------------------------------------
 # Parse statistics shared with ParseHealthCollector
 # ---------------------------------------------------------------------------
+
+
+# Rolling-window size for ``ParseStats.parse_confidence``. The window
+# holds one bool per observed line: True if at least one event was
+# emitted from that line, False if the line was malformed or produced
+# no events. 200 is roughly 4x the parse_health collector's own
+# ``_WINDOW_SIZE`` (50), so the rolling confidence stabilises quickly
+# but still reflects late-session drift that session-wide ratios hide.
+_ROLLING_CONFIDENCE_WINDOW: int = 200
 
 
 @dataclass
@@ -156,21 +175,57 @@ class ParseStats:
     constructor and reads :attr:`parse_confidence` on every snapshot, which
     is how drift detection bridges from the parser to the collector without
     routing through the global error channel.
+
+    ``parse_confidence`` is a *rolling* ratio over the last
+    ``_ROLLING_CONFIDENCE_WINDOW`` observed lines. An earlier
+    implementation used a session-wide ratio and masked late-session
+    drift: a session with 1000 clean leading lines and a final 100
+    corrupt lines still reported 0.91 confidence, above the 0.9
+    CRITICAL threshold. The rolling window flips CRITICAL within the
+    window as soon as the drift rate inside it crosses the threshold.
+    A session-wide ratio is still exposed as :attr:`session_confidence`
+    for callers that want the historical semantic.
     """
 
     total_lines: int = 0
     parsed_events: int = 0
     missing_fields: dict[str, int] = field(default_factory=dict)
+    _line_outcomes: deque[bool] = field(
+        default_factory=lambda: deque(maxlen=_ROLLING_CONFIDENCE_WINDOW)
+    )
 
     def record_missing(self, field_name: str) -> None:
         self.missing_fields[field_name] = self.missing_fields.get(field_name, 0) + 1
 
+    def record_line_outcome(self, *, parsed: bool) -> None:
+        """Append a parseable/unparseable outcome to the rolling window.
+
+        The parser calls this once per observed line — True when the
+        line produced at least one event, False when it was malformed
+        or silently dropped.
+        """
+
+        self._line_outcomes.append(parsed)
+
     @property
     def parse_confidence(self) -> float:
-        """Ratio of successfully-parsed events to total lines seen.
+        """Rolling ratio of parseable lines in the trailing window.
 
         Returns ``1.0`` for an empty session so a freshly-constructed
         collector reports OK rather than flapping CRITICAL on zero data.
+        """
+
+        if not self._line_outcomes:
+            return 1.0
+        hits = sum(1 for outcome in self._line_outcomes if outcome)
+        return hits / len(self._line_outcomes)
+
+    @property
+    def session_confidence(self) -> float:
+        """Session-wide ratio of parsed events to total lines.
+
+        Kept as a separate read-only signal for callers (reports,
+        tests) that want the historical cumulative value.
         """
 
         if self.total_lines == 0:
@@ -197,7 +252,13 @@ class SessionParser:
         self._session_id: str = session_id
         self._stats: ParseStats = ParseStats()
         self._unknown_tools_seen: set[str] = set()
+        # Tracks whether the parser has ever emitted an unknown
+        # fingerprint WARN for this session. Exposed on the property of
+        # the same name for backwards compatibility with tests that
+        # asserted one-warning-per-session; the actual dedup key is the
+        # per-fingerprint set below.
         self._fingerprint_warned: bool = False
+        self._fingerprints_warned: set[str] = set()
         self._lines_fingerprinted: int = 0
 
     @property
@@ -217,7 +278,10 @@ class SessionParser:
 
         Malformed JSON, JSON without a ``type`` field, and JSON with an
         unknown ``type`` value are logged via the error channel and
-        skipped. The parser never raises on per-line errors.
+        skipped. The parser never raises on per-line errors. Every
+        observed line (including skipped ones) is recorded in the
+        rolling parse-confidence window so late-session drift is not
+        masked by a clean early prefix.
         """
 
         for raw_line in lines:
@@ -228,6 +292,7 @@ class SessionParser:
 
             parsed = self._decode_line(line)
             if parsed is None:
+                self._stats.record_line_outcome(parsed=False)
                 continue
 
             self._sample_fingerprint(parsed)
@@ -235,6 +300,7 @@ class SessionParser:
             kind_field = parsed.get("type")
             if not isinstance(kind_field, str):
                 self._stats.record_missing("type")
+                self._stats.record_line_outcome(parsed=False)
                 record(
                     CodevigilError(
                         level=ErrorLevel.WARN,
@@ -246,7 +312,14 @@ class SessionParser:
                 )
                 continue
 
+            before = self._stats.parsed_events
             yield from self._dispatch(parsed, kind_field)
+            # ``_dispatch`` increments ``parsed_events`` for every event
+            # it emits. If the counter moved forward we treat the line
+            # as parseable; otherwise it silently failed (unknown type,
+            # missing message body, etc.) and contributes negatively to
+            # the rolling confidence window.
+            self._stats.record_line_outcome(parsed=self._stats.parsed_events > before)
 
     # ------------------------------------------------------------------
     # Line-level helpers
@@ -287,15 +360,26 @@ class SessionParser:
         return decoded
 
     def _sample_fingerprint(self, parsed: dict[str, Any]) -> None:
-        if self._lines_fingerprinted >= _FINGERPRINT_SAMPLE_SIZE:
+        # Sampling cadence: fingerprint every line during the initial
+        # burst, then every ``_FINGERPRINT_RESAMPLE_STRIDE`` lines for
+        # the rest of the session. The line counter is monotonic across
+        # the whole session so the stride check is stable regardless of
+        # how many lines we've already fingerprinted.
+        line_number = self._stats.total_lines
+        in_initial_burst = self._lines_fingerprinted < _FINGERPRINT_INITIAL_BURST
+        on_resample_tick = line_number > 0 and line_number % _FINGERPRINT_RESAMPLE_STRIDE == 0
+        if not in_initial_burst and not on_resample_tick:
             return
         self._lines_fingerprinted += 1
         fp = _line_fingerprint(parsed)
         digest = _fingerprint_hash(fp)
         if digest in KNOWN_FINGERPRINTS:
             return
-        if self._fingerprint_warned:
+        if digest in self._fingerprints_warned:
+            # We've already reported this exact shape for this session.
+            # Stay quiet rather than spamming every 500 lines.
             return
+        self._fingerprints_warned.add(digest)
         self._fingerprint_warned = True
         record(
             CodevigilError(
@@ -310,6 +394,7 @@ class SessionParser:
                     "session_id": self._session_id,
                     "fingerprint": digest,
                     "keys": list(fp[0]),
+                    "line_number": line_number,
                 },
             )
         )

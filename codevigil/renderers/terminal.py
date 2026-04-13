@@ -224,7 +224,57 @@ class TerminalRenderer:
         sev_word = _SEVERITY_WORD[snap.severity]
         sev_colored = self._paint(sev_word, _SEVERITY_COLOR[snap.severity])
         label = f"[{snap.label}]" if snap.label else ""
+        hint = self._actionable_hint(snap)
+        if hint:
+            return f"  {name} {value}   {sev_colored}   {label} {self._paint(hint, _DIM)}"
         return f"  {name} {value}   {sev_colored}   {label}"
+
+    def _actionable_hint(self, snap: MetricSnapshot) -> str:
+        """Build a one-line drill-down hint appended after the label.
+
+        A bare severity badge is not actionable — "CRIT reasoning_loop"
+        tells the user something is wrong but not what threshold was
+        crossed or what the most recent trigger looked like. This
+        helper reads the structured ``detail`` payload every collector
+        already emits and turns the relevant fields into a short
+        secondary string.
+        """
+
+        detail = snap.detail
+        if not detail:
+            return ""
+        name = snap.name
+        if name == "stop_phrase":
+            recent = detail.get("recent_hits")
+            if isinstance(recent, list) and recent:
+                latest = recent[-1]
+                phrase = latest.get("phrase") if isinstance(latest, dict) else None
+                category = latest.get("category") if isinstance(latest, dict) else None
+                if isinstance(phrase, str):
+                    if isinstance(category, str):
+                        return f"last: {phrase!r} ({category})"
+                    return f"last: {phrase!r}"
+            return ""
+        if name == "reasoning_loop":
+            burst = detail.get("max_burst")
+            calls = detail.get("tool_calls")
+            if isinstance(burst, int) and isinstance(calls, int):
+                return f"burst {burst}, {calls} tool calls"
+            return ""
+        if name == "read_edit_ratio":
+            blind = detail.get("blind_edit_rate")
+            if isinstance(blind, dict):
+                rate = blind.get("value")
+                if isinstance(rate, (int, float)):
+                    return f"blind {rate * 100:.0f}%"
+            return ""
+        if name == "parse_health":
+            missing = detail.get("missing_fields")
+            if isinstance(missing, dict) and missing:
+                top = sorted(missing.items(), key=lambda kv: -kv[1])[:2]
+                return "missing " + ", ".join(f"{k}x{v}" for k, v in top)
+            return ""
+        return ""
 
 
 def _format_duration(seconds: float) -> str:

@@ -46,11 +46,6 @@ _READ_TOOLS: frozenset[str] = frozenset({"read", "view"})
 _RESEARCH_TOOLS: frozenset[str] = frozenset({"grep", "glob", "web_search", "web_fetch"})
 _MUTATION_TOOLS: frozenset[str] = frozenset({"edit", "multi_edit", "write", "notebook_edit"})
 
-# Minimum classified events before severity escalates beyond OK. Below
-# this threshold the collector reports OK with label "warming up" so a
-# fresh session never trips CRITICAL on a single early Edit.
-_MIN_EVENTS_FOR_SEVERITY: int = 10
-
 
 def _classify(tool_name: str) -> Category:
     if tool_name in _READ_TOOLS:
@@ -65,15 +60,18 @@ def _classify(tool_name: str) -> Category:
 class ReadEditRatioCollector:
     """Rolling read-to-edit ratio with blind-edit detection.
 
-    The collector keeps two bounded deques:
+    The collector keeps:
 
     * ``_classifications`` - the per-tool-call category, sized by
       ``window_size`` (default 50). Counters for each category are
       maintained alongside so ``snapshot`` is O(1).
-    * ``_recent_files`` - the last ``blind_edit_window`` (default 20)
-      ``(category, file_path)`` entries. A mutation is "blind" when no
-      preceding entry within the window has the same ``file_path`` as a
-      ``read`` or ``research`` action.
+    * ``_last_seen_read`` - a per-file map from ``file_path`` to the
+      classified-event index where the file was most recently ``read``
+      or ``research`` touched. A mutation at index ``N`` with
+      ``file_path=p`` is "blind" when ``_last_seen_read.get(p)`` is
+      missing or older than ``N - blind_edit_window`` events ago. This
+      replaces an earlier global rolling deque that was polluted by
+      unrelated mutations falling into the same lookback window.
 
     Tracking confidence is the fraction of mutation events whose
     ``file_path`` payload field was populated. Below
@@ -84,7 +82,7 @@ class ReadEditRatioCollector:
     """
 
     name: str = "read_edit_ratio"
-    complexity: str = "O(1) per ingest, O(W) blind-edit lookup"
+    complexity: str = "O(1) per ingest, O(1) blind-edit lookup"
 
     def __init__(self, config: dict[str, Any] | None = None) -> None:
         cfg = config if config is not None else _default_config()
@@ -94,6 +92,7 @@ class ReadEditRatioCollector:
         self._blind_window: int = int(cfg["blind_edit_window"])
         self._blind_confidence_floor: float = float(cfg["blind_edit_confidence_floor"])
         self._experimental: bool = bool(cfg["experimental"])
+        self._min_events_for_severity: int = int(cfg["min_events_for_severity"])
 
         self._classifications: deque[Category] = deque(maxlen=self._window_size)
         self._counts: dict[Category, int] = {
@@ -102,11 +101,17 @@ class ReadEditRatioCollector:
             "mutation": 0,
             "other": 0,
         }
-        # The blind-edit deque holds (category, file_path|None) tuples
-        # for the most recent blind_edit_window tool calls. We append on
-        # every classified event whether or not file_path is populated;
-        # the lookup tolerates None entries by skipping them.
-        self._recent_files: deque[tuple[Category, str | None]] = deque(maxlen=self._blind_window)
+        # Monotonic classified-event index. Incremented on every tool
+        # call that resolved to read / research / mutation / other so
+        # "recency" can be expressed in classified-event distance
+        # without being polluted by other event kinds.
+        self._classified_index: int = 0
+        # Per-file map: file_path -> most recent classified_index where
+        # the file was observed in read or research context. A mutation
+        # lookup checks (current_index - last_read_index) against the
+        # blind_edit_window. O(1) insert and lookup; unbounded in key
+        # count but bounded by unique files touched in the session.
+        self._last_seen_read: dict[str, int] = {}
 
         # Mutation-side bookkeeping for blind edits and tracking
         # confidence. These counts persist across the rolling window
@@ -143,6 +148,7 @@ class ReadEditRatioCollector:
             self._counts[evicted] -= 1
         self._classifications.append(category)
         self._counts[category] += 1
+        self._classified_index += 1
 
         file_path_raw = payload.get("file_path")
         file_path = file_path_raw if isinstance(file_path_raw, str) else None
@@ -156,24 +162,24 @@ class ReadEditRatioCollector:
             # When file_path is missing we cannot judge blindness, so
             # we neither count the mutation as blind nor as not-blind.
             # The tracking_confidence ratio drops accordingly.
-
-        # Always record the entry (even if file_path is None) so the
-        # window slides forward at a uniform rate.
-        self._recent_files.append((category, file_path))
+        elif category in ("read", "research") and file_path is not None:
+            # Record this read/research so a later mutation on the same
+            # file can detect it regardless of unrelated tool calls
+            # that fall between them. We overwrite on every touch so
+            # the most recent index is the one the blindness check
+            # sees.
+            self._last_seen_read[file_path] = self._classified_index
 
     def _is_blind(self, file_path: str) -> bool:
-        # A mutation is blind when no entry in the recent window
-        # corresponds to a read or research touching the same file
-        # path. We scan the deque (bounded by blind_edit_window) so
-        # this is O(W) per mutation, which is the documented
-        # complexity for blind_edit_rate in design.md section
-        # Complexity Honesty.
-        for category, path in self._recent_files:
-            if path != file_path:
-                continue
-            if category in ("read", "research"):
-                return False
-        return True
+        # A mutation is blind when the most recent read or research on
+        # the same file path was either never observed or was more
+        # than ``blind_edit_window`` classified events ago. Per-file
+        # tracking means unrelated mutations between a read and its
+        # follow-up edit cannot pollute the lookback window.
+        last_seen = self._last_seen_read.get(file_path)
+        if last_seen is None:
+            return True
+        return (self._classified_index - last_seen) > self._blind_window
 
     def snapshot(self) -> MetricSnapshot:
         reads = self._counts["read"]
@@ -192,7 +198,7 @@ class ReadEditRatioCollector:
             self._blind_mutations / self._mutations_total if self._mutations_total > 0 else 0.0
         )
 
-        warming_up = classified < _MIN_EVENTS_FOR_SEVERITY
+        warming_up = classified < self._min_events_for_severity
         if warming_up:
             severity = Severity.OK
             label = "warming up"
@@ -240,7 +246,8 @@ class ReadEditRatioCollector:
 
     def reset(self) -> None:
         self._classifications.clear()
-        self._recent_files.clear()
+        self._last_seen_read.clear()
+        self._classified_index = 0
         for key in self._counts:
             self._counts[key] = 0
         self._mutations_total = 0
