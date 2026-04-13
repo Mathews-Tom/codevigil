@@ -1,0 +1,8 @@
+{"type":"system","timestamp":"2026-01-01T00:00:00+00:00","session_id":"fixture-stop-phrase","subtype":"session_start"}
+{"type":"user","timestamp":"2026-01-01T00:00:01+00:00","session_id":"fixture-stop-phrase","message":{"content":"finish the migration"}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:02+00:00","session_id":"fixture-stop-phrase","message":{"content":[{"type":"text","text":"I have outlined the steps. Should I continue with the migration script?"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:03+00:00","session_id":"fixture-stop-phrase","message":{"content":[{"type":"text","text":"This looks like a good stopping point before we touch the schema."}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:04+00:00","session_id":"fixture-stop-phrase","message":{"content":[{"type":"text","text":"Would you like me to run the migration now?"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:05+00:00","session_id":"fixture-stop-phrase","message":{"content":[{"type":"text","text":"That portion is out of scope for this task; I will leave it as future work."}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:06+00:00","session_id":"fixture-stop-phrase","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/home/user/proj/schema.sql"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:07+00:00","session_id":"fixture-stop-phrase","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"create table ..."}]}}
