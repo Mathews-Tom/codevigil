@@ -1,6 +1,6 @@
 [project]
 name = "codevigil"
-version = "0.1.0"
+version = "0.1.1"
 description = "Local, privacy-preserving observability for Claude Code sessions."
 readme = "README.md"
 requires-python = ">=3.11"
@@ -11,7 +11,7 @@ classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
     "Intended Audience :: Developers",
-    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
     "Operating System :: POSIX",
     "Operating System :: POSIX :: Linux",
     "Operating System :: MacOS :: MacOS X",

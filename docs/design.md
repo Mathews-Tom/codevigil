@@ -809,7 +809,7 @@ Published to PyPI. Single package, no extras. `codevigil` console script entry p
 
 ### Repo
 
-Under `Mathews-Tom` on GitHub (`Mathews-Tom/codevigil`). MIT license.
+Under `Mathews-Tom` on GitHub (`Mathews-Tom/codevigil`). Apache License 2.0.
 
 ## Open Questions
 

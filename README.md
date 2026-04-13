@@ -123,4 +123,4 @@ All five gates must pass before a commit lands. The privacy grep runs as a separ
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+Apache License 2.0. See [LICENSE](LICENSE).
