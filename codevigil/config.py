@@ -454,6 +454,12 @@ def _coerce_against_default(dotted: str, value: Any, default: Any, *, source: st
                 ),
                 context={"key": dotted, "expected": "list", "source": source},
             )
+        # ``stop_phrase.custom_phrases`` accepts a mixed list of plain
+        # strings and table entries with ``text``/``mode``/``category``/
+        # ``intent`` keys. Every other list-valued config key is still
+        # the strict ``list[str]`` form.
+        if dotted == "collectors.stop_phrase.custom_phrases":
+            return _coerce_custom_phrase_list(dotted, value, source=source)
         for item in value:
             if not isinstance(item, str):
                 raise ConfigError(
@@ -474,6 +480,61 @@ def _coerce_against_default(dotted: str, value: Any, default: Any, *, source: st
         message=f"config key {dotted!r} has unsupported default type {expected_type.__name__}",
         context={"key": dotted, "type": expected_type.__name__},
     )
+
+
+_CUSTOM_PHRASE_FIELDS: frozenset[str] = frozenset({"text", "mode", "category", "intent"})
+_CUSTOM_PHRASE_MODES: frozenset[str] = frozenset({"word", "regex", "substring"})
+
+
+def _coerce_custom_phrase_list(dotted: str, value: list[Any], *, source: str) -> list[Any]:
+    """Validate the mixed string/table form of ``stop_phrase.custom_phrases``."""
+
+    out: list[Any] = []
+    for item in value:
+        if isinstance(item, str):
+            out.append(item)
+            continue
+        if not isinstance(item, dict):
+            raise ConfigError(
+                code="config.type_mismatch",
+                message=(
+                    f"config key {dotted!r} list item expected str or table, got "
+                    f"{type(item).__name__} in {source}"
+                ),
+                context={"key": dotted, "source": source},
+            )
+        unknown = set(item.keys()) - _CUSTOM_PHRASE_FIELDS
+        if unknown:
+            raise ConfigError(
+                code="config.unknown_key",
+                message=(
+                    f"config key {dotted!r} table entry has unknown field(s) "
+                    f"{sorted(unknown)!r} in {source}"
+                ),
+                context={"key": dotted, "unknown": sorted(unknown), "source": source},
+            )
+        text = item.get("text")
+        if not isinstance(text, str) or not text:
+            raise ConfigError(
+                code="config.type_mismatch",
+                message=(
+                    f"config key {dotted!r} table entry requires a non-empty "
+                    f"'text' field in {source}"
+                ),
+                context={"key": dotted, "source": source},
+            )
+        mode = item.get("mode", "word")
+        if mode not in _CUSTOM_PHRASE_MODES:
+            raise ConfigError(
+                code="config.out_of_range",
+                message=(
+                    f"config key {dotted!r} table entry has invalid mode "
+                    f"{mode!r}; expected one of {sorted(_CUSTOM_PHRASE_MODES)!r} in {source}"
+                ),
+                context={"key": dotted, "mode": mode, "source": source},
+            )
+        out.append(dict(item))
+    return out
 
 
 def _coerce_scalar(dotted: str, raw: Any, *, source: str) -> Any:
