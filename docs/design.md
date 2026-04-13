@@ -739,6 +739,106 @@ v0.1 computes per-session metrics. Future versions need cross-session trending:
 
 This requires a persistence layer (SQLite, append-only JSON log, or similar). The aggregator's snapshot output is already structured enough to store directly. Add a `stores/` module with a `Store` protocol parallel to `Renderer`.
 
+## Historical Analytics Substrate
+
+The `codevigil/analysis/` package provides offline cohort reduction, period-over-period comparison, and sample-size guards for retrospective session analysis. All components are stdlib-only.
+
+### Session Report Schema (stable, schema_version = 1)
+
+Every finalised session writes one JSON file to `$XDG_STATE_HOME/codevigil/sessions/<session_id>.json` (falling back to `~/.local/state/codevigil/sessions/` when `XDG_STATE_HOME` is not set). The schema is pinned and stable. Any future field addition increments `schema_version` and ships a one-way migrator in `analysis/store.py::_migrate_record`.
+
+```json
+{
+    "schema_version": 1,
+    "session_id": "agent-abc123",
+    "project_hash": "abc12345",
+    "project_name": null,
+    "model": null,
+    "permission_mode": null,
+    "started_at": "2026-04-14T10:00:00+00:00",
+    "ended_at": "2026-04-14T10:30:00+00:00",
+    "duration_seconds": 1800.0,
+    "event_count": 120,
+    "parse_confidence": 0.98,
+    "metrics": {
+        "read_edit_ratio": 5.2,
+        "stop_phrase": 0.0,
+        "reasoning_loop": 8.3
+    },
+    "eviction_churn": 0,
+    "cohort_size": 3
+}
+```
+
+Field semantics:
+
+| Field | Type | Notes |
+|---|---|---|
+| `schema_version` | `int` | Always present. Starts at 1. Increment on any schema change. |
+| `session_id` | `str` | The JSONL file stem, stable within a session's lifetime. |
+| `project_hash` | `str` | Parent directory name under `~/.claude/projects`. Non-empty; falls back to a 16-hex SHA-256 prefix of the raw path for unrecognised layouts. |
+| `project_name` | `str \| null` | Human-readable name resolved via `ProjectRegistry`; `null` when unresolved. |
+| `model` | `str \| null` | Model identifier from session metadata. `null` until Phase 5 wires this field. Cohort group-by on `model` silently excludes null records. |
+| `permission_mode` | `str \| null` | Permission mode from session metadata. Same exclusion policy as `model`. |
+| `started_at` | ISO 8601 `str` | Wall-clock timestamp of the first observed event. Timezone-aware. |
+| `ended_at` | ISO 8601 `str` | Wall-clock timestamp of the last observed event before eviction. |
+| `duration_seconds` | `float` | `(ended_at - started_at).total_seconds()`. May be `0.0` for single-event sessions. |
+| `event_count` | `int` | Total events processed by the aggregator for this session. |
+| `parse_confidence` | `float` | `0.0`–`1.0` from `SessionParser.stats.parse_confidence` at eviction time. |
+| `metrics` | `dict[str, float]` | Metric name → scalar value from `MetricSnapshot.value` at eviction time. One entry per active collector. |
+| `eviction_churn` | `int` | Number of sessions evicted during the tick that evicted this session. Fleet-level observability; not used by the cohort reducer. |
+| `cohort_size` | `int` | Number of live sessions at the end of the tick that evicted this session. |
+
+### Schema Migration Policy
+
+Because Phase 3 ships before Phase 1 (the validation substrate), the store will hold real user data before any future phase can extend the schema. Migrations must be one-way and forward-compatible.
+
+Rules enforced in `analysis/store.py::_migrate_record`:
+
+1. **Adding a nullable field:** set the new field to `None` for all old records in the migrator. Never assume the field is present when reading a record of any version.
+2. **Removing a field:** silently drop it. Old records with the removed field are valid; the extra key is ignored.
+3. **Renaming a field:** add the new name (populated from the old value), drop the old name.
+4. **Changing a field type:** coerce the old value to the new type in the migrator.
+5. **Forwards:** code at version N must refuse to read records at version N+1 (raised as `MigrationError`). Never silently interpret a newer schema.
+
+When a phase bumps `schema_version`, it must ship a corresponding `if version < N:` block in `_migrate_record`. A version increment without a migration block is a bug.
+
+### Opt-In Persistence
+
+Persistence is opt-in. The `[storage] enable_persistence` config flag defaults to `false`. When `false`, `codevigil watch` writes nothing under `~/.local/state/codevigil/` beyond the existing log file.
+
+When `enable_persistence = true`, the aggregator writes one JSON file per finalised session (at eviction time). The first write logs a single-line activation notice at INFO level:
+
+```
+persistence enabled, writing to /home/user/.local/state/codevigil/sessions/
+```
+
+This notice fires once per process, on the first successful write, regardless of how many sessions are written subsequently.
+
+### Group-By Dimensions (Closed Set)
+
+The cohort reducer in `analysis/cohort.py` supports exactly five group-by dimensions. This set is deliberately closed — new dimensions are added only when a future phase's feature explicitly needs them:
+
+| Dimension | Key extracted |
+|---|---|
+| `day` | `started_at.date().isoformat()` → `YYYY-MM-DD` |
+| `week` | ISO 8601 week → `YYYY-Www` (Monday-anchored) |
+| `project` | `project_hash` |
+| `model` | `model` (null records excluded) |
+| `permission_mode` | `permission_mode` (null records excluded) |
+
+### Sample-Size Guard
+
+Any cohort cell with `n < 5` observations must never be rendered as a headline number. The guard is enforced by `analysis/guards.py::guard_cell` which raises `CellTooSmall` for cells below the threshold. Renderers and the compare path are responsible for catching `CellTooSmall` and substituting the sentinel string `"n<5"` in all headline-number positions.
+
+This guard applies in every output path: cohort tables, period-over-period comparison, and the Phase 4 report renderer. It cannot be overridden by configuration.
+
+### Period-over-Period Comparison
+
+`analysis/compare.py` implements Welch's t-test via the stdlib `statistics` module and a manual continued-fraction approximation of the regularised incomplete beta function (no `scipy` dependency). The test is two-tailed with a default significance threshold of `p < 0.05`.
+
+When either period has fewer than 2 observations for a given metric, the t-test is skipped and `significant = False` with `p_value = None`. Renderers must always display the raw delta and the p-value alongside the significance flag — the `significant` boolean is a convenience, not a substitute for the underlying numbers.
+
 ## Dependency Policy
 
 ### v0.1: Zero External Dependencies
