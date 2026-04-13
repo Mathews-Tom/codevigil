@@ -36,6 +36,7 @@ from typing import Any
 
 from codevigil import __version__
 from codevigil.aggregator import SessionAggregator
+from codevigil.bootstrap import BootstrapManager
 from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
 from codevigil.errors import CodevigilError, ErrorLevel
 from codevigil.parser import SessionParser, parse_session
@@ -206,11 +207,13 @@ def _run_watch(args: argparse.Namespace) -> int:
         sys.stderr.write(f"CRITICAL: watcher.path_scope_violation: {exc}\n")
         return 2
 
+    bootstrap = _build_bootstrap_manager(cfg)
     aggregator = SessionAggregator(
         source,
         config=cfg,
         project_registry=ProjectRegistry(),
         clock=time.monotonic,
+        bootstrap=bootstrap,
     )
 
     show_badge = _any_experimental_enabled(cfg)
@@ -243,6 +246,45 @@ def _run_watch(args: argparse.Namespace) -> int:
         sys.stdout.write("\ncodevigil shutdown\n")
         sys.stdout.flush()
     return 0
+
+
+def _build_bootstrap_manager(cfg: dict[str, Any]) -> BootstrapManager | None:
+    """Construct the watch-mode bootstrap manager from the resolved config.
+
+    Hard caps are derived from each enabled collector's per-collector
+    ``warn_threshold`` / ``critical_threshold`` keys. Those keys default to
+    the literal values from ``docs/design.md`` §v0.1 Collectors, so the
+    fallback ceiling and the built-in default meet at the same place. If
+    the user overrides a threshold in TOML, that override becomes the new
+    ceiling — calibration should never loosen their intent.
+    """
+
+    bootstrap_cfg = cfg.get("bootstrap")
+    if not isinstance(bootstrap_cfg, dict):
+        return None
+    raw_path = bootstrap_cfg.get("state_path")
+    raw_target = bootstrap_cfg.get("sessions")
+    if not isinstance(raw_path, str) or not isinstance(raw_target, int):
+        return None
+    state_path = Path(raw_path).expanduser()
+    hard_caps: dict[str, tuple[float, float]] = {}
+    collectors_cfg = cfg.get("collectors", {})
+    enabled = collectors_cfg.get("enabled", [])
+    for name in enabled:
+        section = collectors_cfg.get(name)
+        if not isinstance(section, dict):
+            continue
+        warn = section.get("warn_threshold")
+        critical = section.get("critical_threshold")
+        if isinstance(warn, (int, float)) and isinstance(critical, (int, float)):
+            hard_caps[f"{name}.{name}"] = (float(warn), float(critical))
+    mgr = BootstrapManager(
+        state_path=state_path,
+        target_sessions=int(raw_target),
+        hard_caps=hard_caps,
+    )
+    mgr.load()
+    return mgr
 
 
 def _any_experimental_enabled(cfg: dict[str, Any]) -> bool:
