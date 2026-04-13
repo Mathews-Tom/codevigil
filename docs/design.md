@@ -392,3 +392,112 @@ Thresholds:
 
 Baseline from the issue: 8.2 (good) → 21.0 (degraded). These are experimental defaults — see **Thresholds Are Experimental** above. The reasoning-loop patterns use the same word-boundary matching as stop phrases to avoid false positives on `"actually"` inside `"the actually-correct answer"`.
 
+## Parser Design
+
+### JSONL Structure
+
+Claude Code session files live at `~/.claude/projects/<project-hash>/sessions/<session-id>.jsonl`. Each line is a JSON object. The parser needs to handle:
+
+- **assistant turns**: `{"type": "assistant", "message": {...}}` — contains tool_use blocks and text blocks
+- **user turns**: `{"type": "user", "message": {...}}`
+- **thinking blocks**: nested inside assistant messages, `{"type": "thinking", "thinking": "..." | "[redacted]"}`
+- **tool results**: `{"type": "tool_result", ...}`
+- **system events**: session start/end markers
+
+### Parsing Strategy
+
+The parser is a generator that yields `Event` objects. It handles malformed lines gracefully (log + skip, never crash). It tracks enough state to associate tool results with their originating tool calls via `tool_use_id`.
+
+```python
+def parse_session(lines: Iterable[str]) -> Iterator[Event]:
+    ...
+```
+
+This signature works for both batch (read file) and streaming (tail file). The caller decides the source; the parser doesn't care.
+
+### Schema Evolution and Drift Detection
+
+Claude Code's JSONL schema has changed before and will change again. "Defensive parsing" alone is not enough — a silently missing field turns a collector blind without any user-visible symptom. The parser implements **active drift detection**:
+
+1. **Parse confidence.** For each expected-but-missing field, the parser increments a per-session counter. `parse_confidence = 1.0 - (missing / expected)` is attached to every emitted Event (via `SessionMeta.parse_confidence`) and is itself exposed as a meta-metric via the built-in `ParseHealthCollector` (always enabled, cannot be disabled).
+2. **Drift thresholds.** If parse_confidence drops below 0.90 in any 50-event window, `ParseHealthCollector` emits a `CRITICAL` snapshot with `label="schema drift detected"` and `detail={"missing_fields": {...counts...}}`. This is the loud signal a silent break would otherwise eat.
+3. **Schema fingerprint.** At session start the parser samples the first 10 events and records a fingerprint `(set of observed top-level keys, set of observed type values)`. A fingerprint change across session starts is logged at WARN via the error channel with the diff, so users see schema evolution between Claude Code versions without grepping logs.
+4. **Version epoch.** Until Claude Code ships an explicit format version field, codevigil maintains a `KNOWN_FINGERPRINTS: dict[str, SchemaEpoch]` table in `parser.py`. Fingerprints observed in the wild are committed with a date stamp. Unknown fingerprints trigger a one-time WARN per-run ("new Claude Code session schema observed — please open an issue with fingerprint X").
+
+Defensive parsing still handles the per-event case (log + skip malformed line, never crash), but drift is treated as a first-class observable, not a hope.
+
+## Watcher Design
+
+### Source Protocol
+
+Watcher is itself a protocol, not just an implementation, so v0.2 inotify/fsevents backends and test-time fake sources drop in without touching the aggregator.
+
+```python
+class Source(Protocol):
+    def poll(self) -> Iterator[SourceEvent]:
+        """Yield SourceEvents since the last call. Must not block."""
+        ...
+
+    def close(self) -> None: ...
+
+@dataclass(frozen=True, slots=True)
+class SourceEvent:
+    kind: SourceEventKind   # NEW_SESSION | APPEND | ROTATE | TRUNCATE | DELETE
+    session_id: str
+    file_path: Path
+    inode: int
+    lines: list[str]        # complete JSONL lines only; never partial
+```
+
+### v0.1: Poll-Based PollingSource
+
+```python
+class PollingSource:
+    def __init__(self, root: Path, interval: float = 2.0):
+        # state: dict[session_id, FileCursor]
+        ...
+```
+
+Each tracked file has a `FileCursor`:
+
+```python
+@dataclass
+class FileCursor:
+    path: Path
+    inode: int          # identity across rotation
+    offset: int         # byte offset of last fully-consumed newline
+    pending: bytes      # bytes read past last newline, not yet emitted
+```
+
+On each poll cycle the watcher:
+
+1. Enumerates `root/**/sessions/*.jsonl` with a bounded walk (hard cap 2000 files; overflow WARNs once per run).
+2. For each file, `os.stat()` and compare `(st_ino, st_size)` to the cursor. Five cases:
+
+   | Transition              | Action                                                                                                                      |
+   | ----------------------- | --------------------------------------------------------------------------------------------------------------------------- |
+   | unknown path            | create cursor at offset 0, emit `NEW_SESSION`                                                                               |
+   | same inode, size grew   | read delta from `offset` to EOF, split on `\n`, retain tail after last `\n` as `pending`, emit `APPEND` with complete lines |
+   | same inode, size shrank | emit `TRUNCATE`; reset cursor to 0; read from start                                                                         |
+   | inode changed           | emit `ROTATE`; close old cursor; open new at offset 0                                                                       |
+   | path vanished           | emit `DELETE`; mark cursor evicted                                                                                          |
+
+3. **Partial-line safety.** A line is only emitted once it terminates in `\n`. An incomplete trailing fragment stays in `pending` and is prepended on the next read. This is what prevents the "JSON appears partway through a poll cycle" loss.
+4. **Large-file safety.** Delta reads are chunked at 1 MiB. Files that grow more than 10 MiB between polls emit a single WARN and still process the delta — we trust the filesystem.
+
+2-second poll interval is fast enough for human observation without burning CPU. On `~/.claude/projects` with hundreds of subdirs, enumeration is O(dirs) with a single `os.scandir` per directory — benchmarked acceptable for 2000 files at 2s cadence.
+
+### Symlinks
+
+Symlinks inside `~/.claude/projects` are followed once (via `Path.resolve()`), then the resolved inode is tracked. Symlink loops are bounded by `os.stat` failure.
+
+### Stale Session Policy
+
+A session is `ACTIVE` while new lines arrive. After 5 minutes with no APPEND events it transitions to `STALE` — the aggregator stops emitting it to renderers but keeps its collector state in memory. After a further 30 minutes in STALE with no activity it becomes `EVICTED`: collectors are `reset()` and dropped, cursor is closed. Both timeouts are configurable under `[watch]`.
+
+A STALE session that receives a new APPEND returns to ACTIVE with collector state intact — a coffee break should not reset your metrics. Only EVICTED triggers state loss, and only after 35 minutes of silence.
+
+### v0.2+: inotify / fsevents
+
+Drop in an `InotifySource` or `FSEventsSource` implementing the same `Source` protocol. The aggregator doesn't know or care which source is upstream. Cross-platform selection lives behind a factory function in `watcher.py`. The `PollingSource` remains as a universal fallback.
+
