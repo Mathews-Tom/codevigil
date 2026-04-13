@@ -29,6 +29,7 @@ def _make(**overrides: Any) -> ReadEditRatioCollector:
         "critical_threshold": 2.0,
         "blind_edit_window": 20,
         "blind_edit_confidence_floor": 0.95,
+        "min_events_for_severity": 10,
         "experimental": True,
     }
     cfg.update(overrides)
