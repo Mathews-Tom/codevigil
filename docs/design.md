@@ -679,3 +679,146 @@ The zero-dependency constraint collides with the fancy multi-session terminal UI
 3. **One renderer focus.** The v0.1 watch-mode default enables exactly one renderer: `terminal`. Report-mode defaults to `json_file`. Users who want both in watch mode opt in explicitly via config — composing live terminal output with file-append is valid but users should know they're doing it.
 4. **Scope narrowing.** v0.1 ships with `terminal` and `json_file` renderers. Any "dashboard" or "markdown" renderer is v0.2. This keeps the zero-dep surface honest.
 
+## Extension Points (Post v0.1)
+
+These are not designed now, but the architecture must not block them.
+
+### New Collectors
+
+Adding a collector requires:
+
+1. Create `collectors/new_metric.py` implementing `Collector` protocol
+2. Add to registry in `collectors/__init__.py`
+3. Add default config in `config.py`
+
+No changes to parser, aggregator, or renderers. This is the primary extension axis.
+
+**Planned collectors (v0.2+):**
+
+| Collector          | Signal                                     | Depends On                             |
+| ------------------ | ------------------------------------------ | -------------------------------------- |
+| `thinking_depth`   | Signature length proxy for thinking tokens | Thinking block parsing                 |
+| `convention_drift` | Edit compliance against CLAUDE.md rules    | CLAUDE.md parser + edit diffing        |
+| `time_of_day`      | Quality correlation with hour/load         | Aggregation over historical data       |
+| `file_churn`       | Same-file edit count (thrashing detection) | Tool call file path tracking           |
+| `sentiment`        | User frustration indicators in prompts     | Keyword matching on user messages      |
+| `token_efficiency` | Useful output per token consumed           | Token count parsing from API responses |
+| `blind_edit_depth` | How many edits deep without any read       | Sequential tool call analysis          |
+
+### Claude Code Hooks Integration
+
+Claude Code hooks fire on specific lifecycle events. codevigil could register hooks that:
+
+- Block a response if stop-phrase is detected (replaces the bash script approach)
+- Inject "read the file first" when blind-edit-rate exceeds threshold
+- Force `/compact` when context-related quality signals degrade
+
+This requires a `hooks/` module that bridges collector snapshots to hook actions. The aggregator already produces snapshots on a tick — hooks subscribe to snapshots and emit actions.
+
+**Key design constraint:** hooks must be opt-in and clearly separated from passive monitoring. Users should be able to run codevigil as pure instrumentation without it modifying Claude Code behavior.
+
+### MCP Server Mode
+
+`codevigil serve` exposes metrics as an MCP tool server. Claude Code itself (or other agents) can query session quality mid-run.
+
+```
+Tool: get_session_quality
+Returns: { read_edit_ratio: 5.2, stop_phrase_hits: 0, ... }
+```
+
+This enables self-aware agents — Claude Code could check its own quality metrics and self-correct. The MCP server is a renderer that speaks the MCP protocol instead of writing to terminal/file.
+
+### Multi-Session Aggregation and Trending
+
+v0.1 computes per-session metrics. Future versions need cross-session trending:
+
+- Daily/weekly quality score
+- Regression detection (quality dropped compared to N-day baseline)
+- Time-of-day heatmaps
+- Per-project quality comparison
+
+This requires a persistence layer (SQLite, append-only JSON log, or similar). The aggregator's snapshot output is already structured enough to store directly. Add a `stores/` module with a `Store` protocol parallel to `Renderer`.
+
+## Dependency Policy
+
+### v0.1: Zero External Dependencies
+
+stdlib only. No click, no rich, no watchdog, no tomllib backport (Python 3.11+ has `tomllib`). Terminal colors via ANSI escape codes. File watching via `os.stat()` polling.
+
+Minimum Python version: **3.11** (for `tomllib`, `StrEnum`, `slots=True` on dataclasses).
+
+### When to Add Dependencies
+
+A dependency is justified when:
+
+1. It replaces >200 lines of hand-rolled code, AND
+2. It's well-maintained (>1K stars, recent commits), AND
+3. It has zero transitive dependencies (or all transitive deps are also justified)
+
+Likely first additions: `rich` (terminal rendering), `watchdog` (filesystem events). Neither before v0.2.
+
+## Testing Strategy
+
+### Unit Tests
+
+Each collector gets a test file that feeds it a sequence of Events and asserts snapshot values. These are the core correctness tests.
+
+```python
+def test_read_edit_ratio_healthy():
+    c = ReadEditRatioCollector(Config.defaults())
+    for _ in range(6):
+        c.ingest(make_event(EventKind.TOOL_CALL, tool="Read"))
+    c.ingest(make_event(EventKind.TOOL_CALL, tool="Edit"))
+    snap = c.snapshot()
+    assert snap.value == 6.0
+    assert snap.severity == Severity.OK
+```
+
+### Integration Tests
+
+Feed real (anonymized) JSONL snippets through the full pipeline and assert report output. Keep 3-5 representative session fragments as test fixtures under `tests/fixtures/sessions/`.
+
+### Fixture Sourcing
+
+Fixtures are generated, not fabricated. The process:
+
+1. **Source.** The contributor runs a real Claude Code session and copies the raw JSONL from `~/.claude/projects/<hash>/sessions/<id>.jsonl`.
+2. **Anonymize.** A `tests/tools/anonymize_session.py` script performs: path stripping (replace home dir with `/home/user`), content redaction of any string matching common secret patterns (`sk-`, `ghp_`, AWS key prefixes), project-hash rewrite to a stable `fixture-<n>` token, and timestamp normalisation to a fixed base date. The anonymizer's output is deterministic given the same input.
+3. **Review.** The anonymized file is manually reviewed before check-in. Each fixture has a sibling `fixture.md` that documents what scenario it represents (e.g., "healthy refactor session with high R:E and one legitimate 'actually' self-correction").
+4. **License.** Contributors must confirm they own the session or have permission to redistribute the anonymized form. The fixture PR template includes this checkbox.
+
+The initial v0.1 fixture set targets: one healthy session, one degraded R:E session, one stop-phrase-triggered session, one schema-drift session (hand-crafted to test `ParseHealthCollector`), and one mixed session used for the threshold-calibration baseline.
+
+### Calibration Dataset
+
+The anonymized fixture set doubles as the calibration corpus for threshold tuning. A `scripts/recalibrate_thresholds.py` tool runs all fixtures through each collector and emits a suggested threshold table based on the observed value distribution. Defaults in `config.py` are updated from this tool's output, not hand-picked, as the fixture corpus grows.
+
+### Regression Tests
+
+Once we have real users, capture session files that exhibited known quality issues. These become golden-file tests: "this session should produce R:E < 2.0 and CRITICAL severity." Regression fixtures go through the same anonymization pipeline as integration fixtures.
+
+## Distribution
+
+### Package
+
+```
+pip install codevigil
+```
+
+Published to PyPI. Single package, no extras. `codevigil` console script entry point.
+
+### Repo
+
+Under `Mathews-Tom` on GitHub (`Mathews-Tom/codevigil`). MIT license.
+
+## Open Questions
+
+1. **Session identification.** Claude Code session files don't have a clean "session start" marker. **Resolved for v0.1:** one file = one session, session_id = file stem. The parser additionally records the first observed SYSTEM event's `cwd` and any session-start payload into SessionMeta for future use.
+
+2. **Tool name normalization.** Tool names in JSONL vary across Claude Code versions (`Read` vs `read` vs `file_read`). **Resolved for v0.1:** a `TOOL_ALIASES: dict[str, str]` table in `parser.py` normalises to canonical lowercase snake_case names before Events are emitted. Unknown tool names pass through unchanged and are logged once per run at INFO. The table is small, committed, and updated as Claude Code evolves.
+
+3. **Thinking block parsing.** The signature-to-thinking-length correlation (r=0.971) from the issue is powerful but relies on an undocumented field. **Resolved: defer the `thinking_depth` collector to v0.2, but reserve the THINKING payload schema now** (see Core Abstractions → Payload Schemas) so no migration is needed when the collector lands.
+
+4. **Privacy enforcement.** **Resolved:** see the **Privacy Enforcement** section. Runtime import hook, filesystem scope check, CI grep gate, and subprocess ban. No-network is a technical guarantee, not a README promise.
+
+5. **Remaining open.** The bootstrap window size (N=10 default) is a guess. After the first calibration dataset lands, revisit based on observed distributional stability per collector — collectors with high variance may need larger N.
