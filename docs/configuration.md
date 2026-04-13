@@ -21,6 +21,7 @@ The default config tree has these top-level sections:
 - [`[report]`](#report) — batch report output
 - [`[logging]`](#logging) — error log file path
 - [`[bootstrap]`](#bootstrap) — threshold calibration window
+- [`[storage]`](#storage) — opt-in session-report persistence
 
 ## `[watch]`
 
@@ -147,6 +148,36 @@ For **high-is-worse** metrics (`stop_phrase`, `reasoning_loop`): the hard cap is
 For **low-is-worse** metrics (`read_edit_ratio`): the hard cap is a **looseness floor**. Bootstrap picks the p20 (WARN) and p5 (CRITICAL) of your local distribution, then applies `max(p20, warn_cap)` and `min(p5, critical_cap)`. Bootstrap can relax toward your observed normal, but can never strictify past your configured cap.
 
 The practical implication: a user who sets `warn_threshold = 5.0` for `read_edit_ratio` will never see bootstrap move the warning trigger above `5.0`, even if their sessions routinely produce ratios of `3.0`. The explicit threshold acts as the looseness floor. This is intentional — user-supplied values signal intent, and bootstrap must respect the intent's direction.
+
+## `[storage]`
+
+Controls whether `codevigil watch` writes finalised session reports to disk for retrospective analysis.
+
+| Key | Type | Default | Description |
+|---|---|---|---|
+| `enable_persistence` | `bool` | `false` | When `false` (the default), `codevigil watch` writes nothing under `~/.local/state/codevigil/sessions/`. Set to `true` to enable the session-report store. The first write logs a single-line activation notice naming the target directory. |
+| `min_observation_days` | `int` | `1` | Minimum number of calendar days a period must span to be included in cohort output. Periods shorter than this are dropped with a logged reason. Range: `[1, 365]`. |
+
+### Enabling persistence
+
+```toml
+[storage]
+enable_persistence = true
+```
+
+When persistence is first enabled, codevigil logs a one-time activation notice at INFO level:
+
+```
+persistence enabled, writing to /home/user/.local/state/codevigil/sessions/
+```
+
+The session directory is resolved as `$XDG_STATE_HOME/codevigil/sessions/` when `XDG_STATE_HOME` is set, falling back to `~/.local/state/codevigil/sessions/`.
+
+Session reports are written at session eviction time (when a session has been silent for `evict_after_seconds`). Each report is one JSON file named `<session_id>.json`. See `docs/design.md §Session Report Schema` for the full field reference and migration policy.
+
+### Default behaviour (persistence disabled)
+
+With the default `enable_persistence = false`, `codevigil watch` creates no files under `~/.local/state/codevigil/sessions/`. The existing log file at `~/.local/state/codevigil/codevigil.log` and bootstrap state at `~/.local/state/codevigil/bootstrap.json` are unaffected.
 
 ## Environment variables
 

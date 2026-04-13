@@ -39,6 +39,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from codevigil.analysis.store import SessionStore, build_report
 from codevigil.bootstrap import BootstrapManager
 from codevigil.collectors import COLLECTORS
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
@@ -117,6 +118,10 @@ class SessionAggregator:
         self._clock: _ClockFn = clock
         self._sessions: dict[str, _SessionContext] = {}
         self._bootstrap: BootstrapManager | None = bootstrap
+
+        storage_cfg = config.get("storage", {})
+        self._persistence_enabled: bool = bool(storage_cfg.get("enable_persistence", False))
+        self._store: SessionStore | None = SessionStore() if self._persistence_enabled else None
 
         watch_cfg = config.get("watch", {})
         self._stale_after: float = float(watch_cfg.get("stale_after_seconds", 300))
@@ -577,7 +582,53 @@ class SessionAggregator:
             )
         )
         self._observe_for_bootstrap(ctx)
+        self._write_session_report(ctx)
         self._reset_collectors(ctx)
+
+    def _write_session_report(self, ctx: _SessionContext) -> None:
+        """Persist a finalised session report when persistence is enabled.
+
+        Called at session eviction time (natural end-of-session boundary).
+        Skipped entirely when ``storage.enable_persistence = false`` (the
+        default). Any I/O error is routed through the error channel rather
+        than crashing the loop.
+        """
+        if self._store is None:
+            return
+        snapshots = ctx.last_snapshots
+        if not snapshots and ctx.event_count == 0:
+            # Never received any events; skip — an empty report is noise.
+            return
+        metrics: dict[str, float] = {name: snap.value for name, snap in snapshots.items()}
+        try:
+            report = build_report(
+                session_id=ctx.session_id,
+                project_hash=ctx.project_hash,
+                project_name=self._project_registry.resolve(ctx.project_hash),
+                model=None,  # Phase 5 wires model from session metadata
+                permission_mode=None,  # Phase 5 wires permission_mode
+                started_at=ctx.first_event_time,
+                ended_at=ctx.last_event_time,
+                event_count=ctx.event_count,
+                parse_confidence=float(ctx.parser.stats.parse_confidence),
+                metrics=metrics,
+                eviction_churn=self._eviction_churn,
+                cohort_size=self._cohort_size,
+            )
+            self._store.write(report)
+        except Exception as exc:
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.AGGREGATOR,
+                    code="aggregator.store_write_failed",
+                    message=f"failed to write session report for {ctx.session_id!r}: {exc}",
+                    context={
+                        "session_id": ctx.session_id,
+                        "exception_type": type(exc).__name__,
+                    },
+                )
+            )
 
     def _reset_collectors(self, ctx: _SessionContext) -> None:
         for collector_name, collector in ctx.collectors.items():
