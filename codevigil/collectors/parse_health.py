@@ -21,11 +21,11 @@ from collections import deque
 from typing import Any
 
 from codevigil.collectors import COLLECTORS, register_collector
+from codevigil.config import CONFIG_DEFAULTS
 from codevigil.parser import ParseStats
 from codevigil.types import Event, MetricSnapshot, Severity
 
 _WINDOW_SIZE: int = 50
-_CRITICAL_THRESHOLD: float = 0.9
 
 
 class ParseHealthCollector:
@@ -34,14 +34,21 @@ class ParseHealthCollector:
     ``ingest`` records every event into a fixed-length window so the
     collector knows when the parser has accumulated enough data to make a
     drift judgement; ``snapshot()`` reads ``parse_confidence`` off the
-    shared :class:`ParseStats` and flags CRITICAL when it dips below
-    ``0.9`` once the window has filled.
+    shared :class:`ParseStats` and flags CRITICAL when it dips below the
+    configured threshold (default ``0.9``) once the window has filled.
     """
 
     name: str = "parse_health"
     complexity: str = "O(1)"
 
-    def __init__(self, stats: ParseStats | None = None) -> None:
+    def __init__(
+        self,
+        config: dict[str, Any] | None = None,
+        *,
+        stats: ParseStats | None = None,
+    ) -> None:
+        cfg = config if config is not None else _default_config()
+        self._critical_threshold: float = float(cfg["critical_threshold"])
         self._stats: ParseStats = stats if stats is not None else ParseStats()
         self._window: deque[Event] = deque(maxlen=_WINDOW_SIZE)
 
@@ -65,7 +72,7 @@ class ParseHealthCollector:
         # still trip CRITICAL even though the deque only holds the
         # successful events.
         window_full = self._stats.total_lines >= _WINDOW_SIZE or len(self._window) >= _WINDOW_SIZE
-        is_critical = window_full and confidence < _CRITICAL_THRESHOLD
+        is_critical = window_full and confidence < self._critical_threshold
         severity = Severity.CRITICAL if is_critical else Severity.OK
         detail: dict[str, Any] = {
             "window_size": len(self._window),
@@ -86,6 +93,10 @@ class ParseHealthCollector:
     def reset(self) -> None:
         self._window.clear()
         self._stats = ParseStats()
+
+
+def _default_config() -> dict[str, Any]:
+    return dict(CONFIG_DEFAULTS["collectors"]["parse_health"])
 
 
 register_collector(COLLECTORS, ParseHealthCollector)
