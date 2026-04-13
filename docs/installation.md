@@ -102,12 +102,12 @@ The `Requires` field should be empty. If you see anything listed, you have a dif
 
 codevigil writes to three locations under your home directory. None of them are created at install time — they appear lazily on first run:
 
-| Path | Purpose |
-| --- | --- |
-| `~/.config/codevigil/config.toml` | Optional. User config, you create it. |
-| `~/.local/share/codevigil/reports/` | Default report output directory. |
-| `~/.local/state/codevigil/codevigil.log` | Rotating JSONL error log (10 MiB × 3 files). |
-| `~/.local/state/codevigil/bootstrap.json` | Bootstrap calibration state. |
+| Path                                      | Purpose                                      |
+| ----------------------------------------- | -------------------------------------------- |
+| `~/.config/codevigil/config.toml`         | Optional. User config, you create it.        |
+| `~/.local/share/codevigil/reports/`       | Default report output directory.             |
+| `~/.local/state/codevigil/codevigil.log`  | Rotating JSONL error log (10 MiB × 3 files). |
+| `~/.local/state/codevigil/bootstrap.json` | Bootstrap calibration state.                 |
 
 All four are inside `$HOME` and respect the filesystem scope gate. None of them are created until codevigil actually writes to them.
 

@@ -52,19 +52,19 @@ session: a3f7c2d | project: my-project | 2m 34s ACTIVE
 
 ### Reading the header
 
-| Field | Meaning |
-| --- | --- |
-| `codevigil` | The tool name. |
-| `[experimental thresholds]` | Shown while any enabled collector still has `experimental = true`. Disappears after bootstrap completes or you flip the flag in config. |
-| `parse_confidence: 1.00` | Fraction of input lines successfully parsed as events in the current 50-line drift window. Drops below `0.9` → CRITICAL banner from `parse_health`. |
+| Field                       | Meaning                                                                                                                                             |
+| --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `codevigil`                 | The tool name.                                                                                                                                      |
+| `[experimental thresholds]` | Shown while any enabled collector still has `experimental = true`. Disappears after bootstrap completes or you flip the flag in config.             |
+| `parse_confidence: 1.00`    | Fraction of input lines successfully parsed as events in the current 50-line drift window. Drops below `0.9` → CRITICAL banner from `parse_health`. |
 
 ### Reading the session line
 
-| Field | Meaning |
-| --- | --- |
-| `session: a3f7c2d` | First 8 chars of the session id (the JSONL filename stem). |
-| `project: my-project` | Resolved via `~/.config/codevigil/projects.toml` → first observed `cwd` in a SYSTEM event → raw hash prefix fallback. |
-| `2m 34s` | Wall-clock duration from first event to last event in the session. |
+| Field                          | Meaning                                                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `session: a3f7c2d`             | First 8 chars of the session id (the JSONL filename stem).                                                                                        |
+| `project: my-project`          | Resolved via `~/.config/codevigil/projects.toml` → first observed `cwd` in a SYSTEM event → raw hash prefix fallback.                             |
+| `2m 34s`                       | Wall-clock duration from first event to last event in the session.                                                                                |
 | `ACTIVE` / `STALE` / `EVICTED` | Lifecycle state. ACTIVE = recent activity. STALE = silent ≥ 5 min, collector state preserved. EVICTED = silent ≥ 35 min, collector state cleared. |
 
 ### Reading metric lines
@@ -129,7 +129,7 @@ Pipe this through `jq` to compute anything you want — tool-call histograms, fi
 
 The shipped defaults are conservative starting points. They are marked `experimental = true` and the watch header shows `[experimental thresholds]` to remind you they are not calibrated for your specific workflow.
 
-The fastest way to get personalised thresholds is to **just run watch mode**. The aggregator's bootstrap manager will silently observe your first 10 sessions (configurable via `bootstrap.sessions`) with all severities pinned to `OK`, then derive WARN at p80 and CRITICAL at p95 of *your* local distribution. After bootstrap completes the experimental badge disappears.
+The fastest way to get personalised thresholds is to **just run watch mode**. The aggregator's bootstrap manager will silently observe your first 10 sessions (configurable via `bootstrap.sessions`) with all severities pinned to `OK`, then derive WARN at p80 and CRITICAL at p95 of _your_ local distribution. After bootstrap completes the experimental badge disappears.
 
 If you want to inspect the calibrated thresholds before they take effect, use the offline recalibration helper against a fixture corpus:
 

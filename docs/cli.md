@@ -6,21 +6,21 @@ Exhaustive reference for every codevigil subcommand and flag. For a quick first-
 
 These apply to every subcommand and must appear before the subcommand name on the command line.
 
-| Flag | Description |
-| --- | --- |
-| `-h, --help` | Show help for the top-level command and exit. |
-| `--version` | Print `codevigil <version>` and exit. |
-| `--config PATH` | Path to a TOML config file. Overrides `~/.config/codevigil/config.toml`. |
-| `--explain` | Surface `stop_phrase` collector `intent` annotations in `watch`, `report`, and `export` output. |
+| Flag            | Description                                                                                     |
+| --------------- | ----------------------------------------------------------------------------------------------- |
+| `-h, --help`    | Show help for the top-level command and exit.                                                   |
+| `--version`     | Print `codevigil <version>` and exit.                                                           |
+| `--config PATH` | Path to a TOML config file. Overrides `~/.config/codevigil/config.toml`.                        |
+| `--explain`     | Surface `stop_phrase` collector `intent` annotations in `watch`, `report`, and `export` output. |
 
 ## Subcommands
 
-| Subcommand | Purpose |
-| --- | --- |
-| [`config check`](#config-check) | Resolve the effective config and print each value with its source. |
-| [`watch`](#watch) | Live tick loop over `~/.claude/projects` with a terminal dashboard. |
-| [`report`](#report) | Batch analysis over one or more session files. |
-| [`export`](#export) | Stream parsed events as NDJSON on stdout. |
+| Subcommand                      | Purpose                                                             |
+| ------------------------------- | ------------------------------------------------------------------- |
+| [`config check`](#config-check) | Resolve the effective config and print each value with its source.  |
+| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard. |
+| [`report`](#report)             | Batch analysis over one or more session files.                      |
+| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                           |
 
 ---
 
@@ -122,18 +122,18 @@ Batch analysis over one or more session files. Walks the input, parses each file
 
 ### Positional argument
 
-| Argument | Description |
-| --- | --- |
-| `PATH` | A file, a directory (recursively walked for `*.jsonl`), or a shell glob pattern. Globs are evaluated relative to the parent directory of the pattern. |
+| Argument | Description                                                                                                                                           |
+| -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `PATH`   | A file, a directory (recursively walked for `*.jsonl`), or a shell glob pattern. Globs are evaluated relative to the parent directory of the pattern. |
 
 ### Flags
 
-| Flag | Description |
-| --- | --- |
-| `--from YYYY-MM-DD` | Drop sessions whose first event timestamp is strictly before this date. |
-| `--to YYYY-MM-DD` | Drop sessions whose first event timestamp is strictly after this date. |
-| `--format {json,markdown}` | Output format. Default `json`. |
-| `--output DIR` | Override the report output directory. Must resolve under `$HOME`. |
+| Flag                       | Description                                                             |
+| -------------------------- | ----------------------------------------------------------------------- |
+| `--from YYYY-MM-DD`        | Drop sessions whose first event timestamp is strictly before this date. |
+| `--to YYYY-MM-DD`          | Drop sessions whose first event timestamp is strictly after this date.  |
+| `--format {json,markdown}` | Output format. Default `json`.                                          |
+| `--output DIR`             | Override the report output directory. Must resolve under `$HOME`.       |
 
 ### JSON output shape
 
@@ -220,9 +220,9 @@ Streams the parsed event stream as NDJSON on stdout, one JSON object per line. D
 
 ### Positional argument
 
-| Argument | Description |
-| --- | --- |
-| `PATH` | A file, a directory (recursively walked for `*.jsonl`), or a shell glob pattern. |
+| Argument | Description                                                                      |
+| -------- | -------------------------------------------------------------------------------- |
+| `PATH`   | A file, a directory (recursively walked for `*.jsonl`), or a shell glob pattern. |
 
 ### Output shape
 

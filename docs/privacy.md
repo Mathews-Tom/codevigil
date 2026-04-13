@@ -22,19 +22,19 @@ The blast radius of a regression that exfiltrates this data is large enough to j
 
 ### What is blocked
 
-| Module / package | Why blocked |
-| --- | --- |
-| `socket`, `socket.*` | Raw network sockets |
-| `ssl` | TLS — no encrypted transport that we don't have |
-| `urllib`, `urllib.*` | URL fetching |
-| `urllib3` | Same |
-| `http`, `http.client`, `http.server` | HTTP transport |
-| `httpx`, `requests`, `aiohttp` | High-level HTTP libraries |
-| `ftplib`, `smtplib`, `poplib`, `imaplib`, `nntplib`, `telnetlib` | Other transports |
-| `xmlrpc`, `xmlrpc.*` | RPC over HTTP |
-| `subprocess` | Process spawning — could shell out to `curl` |
-| `pty` | Pseudo-terminals — could spawn a shell |
-| `multiprocessing.popen_*` | Process spawning under another name |
+| Module / package                                                 | Why blocked                                     |
+| ---------------------------------------------------------------- | ----------------------------------------------- |
+| `socket`, `socket.*`                                             | Raw network sockets                             |
+| `ssl`                                                            | TLS — no encrypted transport that we don't have |
+| `urllib`, `urllib.*`                                             | URL fetching                                    |
+| `urllib3`                                                        | Same                                            |
+| `http`, `http.client`, `http.server`                             | HTTP transport                                  |
+| `httpx`, `requests`, `aiohttp`                                   | High-level HTTP libraries                       |
+| `ftplib`, `smtplib`, `poplib`, `imaplib`, `nntplib`, `telnetlib` | Other transports                                |
+| `xmlrpc`, `xmlrpc.*`                                             | RPC over HTTP                                   |
+| `subprocess`                                                     | Process spawning — could shell out to `curl`    |
+| `pty`                                                            | Pseudo-terminals — could spawn a shell          |
+| `multiprocessing.popen_*`                                        | Process spawning under another name             |
 
 The hook is active **in every execution mode**: `watch`, `report`, `export`, `config check`, library imports from third-party code, and the test suite.
 
