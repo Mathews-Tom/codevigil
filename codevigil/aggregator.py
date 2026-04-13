@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+from collections import deque
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -68,6 +69,17 @@ class _SessionContext:
     tests. ``last_event_time`` is the wall-clock timestamp from the last
     emitted :class:`Event` and is what the renderer surfaces in
     :class:`SessionMeta`.
+
+    ``first_event_time`` starts as the watcher's wall-clock timestamp for
+    the NEW_SESSION event (a reasonable fallback) and is overwritten by the
+    first successfully-parsed event's own ``timestamp`` field. This is the
+    authoritative session start time: the parsed timestamp reflects when
+    Claude Code actually started the session, whereas the watcher timestamp
+    reflects when codevigil first noticed the file. The distinction matters
+    for uptime: a session file that was already minutes or hours old when
+    codevigil first saw it would otherwise show 0s uptime on the first tick.
+    ``first_event_time_set`` tracks whether the overwrite has happened so
+    we only take the first parsed event, not the last.
     """
 
     session_id: str
@@ -81,6 +93,12 @@ class _SessionContext:
     event_count: int = 0
     state: SessionState = SessionState.ACTIVE
     last_snapshots: dict[str, MetricSnapshot] = field(default_factory=dict)
+    first_event_time_set: bool = False
+    # Bounded per-metric value history for mini-trend display. Keyed by
+    # collector name; each deque holds the last 3 scalar values in
+    # chronological order (oldest first). The deque is capped at 3 so
+    # memory growth is O(collectors * 3) per session.
+    snapshot_history: dict[str, deque[float]] = field(default_factory=dict)
 
 
 _ClockFn = Callable[[], float]
@@ -354,6 +372,9 @@ class SessionAggregator:
 
     def _ingest_line(self, ctx: _SessionContext, line: str) -> None:
         for event in ctx.parser.parse([line]):
+            if not ctx.first_event_time_set:
+                ctx.first_event_time = event.timestamp
+                ctx.first_event_time_set = True
             ctx.event_count += 1
             ctx.last_event_time = event.timestamp
             ctx.last_monotonic = self._clock()
@@ -429,6 +450,12 @@ class SessionAggregator:
             try:
                 raw = collector.snapshot()
                 ctx.last_snapshots[collector_name] = raw
+                # Update the bounded per-metric value history (max 3 entries).
+                history = ctx.snapshot_history.get(collector_name)
+                if history is None:
+                    history = deque(maxlen=3)
+                    ctx.snapshot_history[collector_name] = history
+                history.append(raw.value)
                 snapshots.append(self._apply_bootstrap_clamp(collector_name, raw))
             except CodevigilError as err:
                 self._record_collector_error(
@@ -520,6 +547,10 @@ class SessionAggregator:
 
     def _build_meta(self, ctx: _SessionContext) -> SessionMeta:
         confidence = ctx.parser.stats.parse_confidence
+        # Convert bounded deques to immutable tuples for SessionMeta.
+        history: dict[str, tuple[float, ...]] = {
+            name: tuple(dq) for name, dq in ctx.snapshot_history.items()
+        }
         return SessionMeta(
             session_id=ctx.session_id,
             project_hash=ctx.project_hash,
@@ -530,6 +561,7 @@ class SessionAggregator:
             event_count=ctx.event_count,
             parse_confidence=float(confidence),
             state=ctx.state,
+            snapshot_history=history,
         )
 
     # ----------------------------------------------------------------- lifecycle
