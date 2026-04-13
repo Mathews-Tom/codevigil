@@ -105,14 +105,9 @@ class TestHistoryDiffCLI:
 
 
 class TestHistoryHeatmapCLI:
-    def test_heatmap_rich_absent_exits_2(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import codevigil.history as history_module
-        import codevigil.history.heatmap_cmd as heatmap_module
-
-        monkeypatch.setattr(history_module, "RICH", None)
-        monkeypatch.setattr(heatmap_module, "RICH", None)
-
-        code = main(["history", "heatmap", "some-session"])
-        assert code == 2
+    def test_heatmap_missing_session_exits_1(self, tmp_path: Path) -> None:
+        with patch("codevigil.history.heatmap_cmd.SessionStore") as mock_cls:
+            mock_cls.return_value = SessionStore(base_dir=tmp_path)
+            with patch("sys.stdout", new_callable=io.StringIO):
+                code = main(["history", "heatmap", "no-such-session"])
+        assert code == 1
