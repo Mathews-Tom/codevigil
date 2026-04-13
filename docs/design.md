@@ -269,3 +269,126 @@ COLLECTORS: dict[str, type[Collector]] = {
 
 Config enables/disables collectors by name. Unknown names in config are errors, not silently ignored.
 
+## v0.1 Collectors
+
+### Thresholds Are Experimental
+
+All default thresholds in this section come from a single data point: stellaraccident's post-hoc analysis (6.6 R:E healthy → 2.0 degraded; 8.2 loop-rate healthy → 21.0 degraded). **One user's session window is not a population baseline.** Shipping these as authoritative would produce false positives in legitimate contexts: tight debugging loops genuinely invert R:E, careful reasoning genuinely uses "actually", refactor sprints are edit-heavy by design.
+
+v0.1 addresses this in three ways:
+
+1. **Thresholds are marked `experimental = true` in config** and the watch-mode header shows a `[experimental thresholds]` badge until the user explicitly sets `experimental = false`.
+2. **Bootstrap mode.** On first run, codevigil observes N sessions (default N=10, configurable) with severity pinned to `OK` and records per-collector value distributions. After bootstrap, defaults shift to percentile-based thresholds: WARN at p80, CRITICAL at p95 of the local distribution, clamped by hard caps from the literal-value defaults below. This personalizes signal to the actual workflow without requiring manual tuning.
+3. **Calibration dataset.** The repo ships with an anonymized fixture set (see **Testing Strategy → Fixture Sourcing**) so thresholds can be re-derived as more data becomes available.
+
+The literal defaults below are the hard caps and the fallback when bootstrap is disabled.
+
+### 1. ReadEditRatioCollector
+
+Tracks file-level tool calls. Classifies each tool call as:
+
+| Tool                           | Classification |
+| ------------------------------ | -------------- |
+| `Read` / `View`                | read           |
+| `Grep` / `Glob` / `LS`         | research       |
+| `Edit` / `Write` / `MultiEdit` | mutation       |
+| Everything else                | other          |
+
+Computes:
+
+- **read_edit_ratio**: reads / edits (rolling window, default 50 tool calls)
+- **research_mutation_ratio**: (reads + research) / mutations
+- **blind_edit_rate**: edits where the target file was not read in the last N tool calls
+- **blind_edit_tracking_confidence**: fraction of edit events for which the collector could resolve the target file path from the tool input payload. If this drops below 0.95, the `blind_edit_rate` snapshot is emitted with `severity=OK` and `label="insufficient data"` — a low-confidence metric must not fire a CRITICAL. The confidence itself is surfaced as `detail["tracking_confidence"]` so renderers can show a dim indicator when the collector has gone partially blind.
+
+Thresholds (configurable):
+
+- OK: R:E ≥ 4.0
+- WARN: 2.0 ≤ R:E < 4.0
+- CRITICAL: R:E < 2.0
+
+These defaults come directly from stellaraccident's data: 6.6 was healthy, 2.0 was degraded.
+
+### 2. StopPhraseCollector
+
+Pattern-matches against assistant message text. Default phrase list (from the issue's stop-phrase-guard.sh categories):
+
+```text
+ownership_dodging:
+  - "not caused by my changes"
+  - "existing issue"
+  - "pre-existing"
+  - "outside the scope"
+
+permission_seeking:
+  - "should I continue"
+  - "want me to keep going"
+  - "shall I proceed"
+  - "would you like me to"
+
+premature_stopping:
+  - "good stopping point"
+  - "natural checkpoint"
+  - "let's pause here"
+
+known_limitation:
+  - "known limitation"
+  - "future work"
+  - "out of scope"
+  - "beyond the scope"
+```
+
+Users add custom phrases via config. Matching is case-insensitive with **word-boundary anchoring**: internally each phrase compiles to `re.compile(r'(?<!\w)' + re.escape(phrase) + r'(?!\w)', re.IGNORECASE)`. This prevents the classic substring trap where `"should I"` matches `"shoulder inflammation"`. Users who want true substring behaviour can opt in per phrase via a `{phrase = "...", mode = "substring"}` table form in config.
+
+Each phrase entry carries an intent annotation so custom additions don't drift from the categories' original meaning:
+
+```toml
+[[collectors.stop_phrase.phrases]]
+text = "actually,"
+category = "reasoning_loop"
+intent = "self-correction after a clause boundary; the trailing comma is load-bearing"
+```
+
+The `intent` field is documentation, not logic — it surfaces in `--explain` output so users can audit why a phrase matched.
+
+Computes:
+
+- **hit_rate**: matches per 1K tool calls
+- **hits_by_category**: breakdown by category
+- **recent_hits**: last 5 matches with timestamps and matched phrase
+
+Thresholds:
+
+- OK: 0 hits in current session
+- WARN: 1-5 hits
+- CRITICAL: >5 hits
+
+### 3. ReasoningLoopCollector
+
+Counts self-correction patterns in assistant messages:
+
+```text
+patterns:
+  - "oh wait"
+  - "actually,"
+  - "let me reconsider"
+  - "hmm, actually"
+  - "no wait"
+  - "I was wrong"
+  - "let me rethink"
+  - "on second thought"
+```
+
+Computes:
+
+- **loop_rate**: matches per 1K tool calls
+- **max_burst**: highest count in a single message
+
+Thresholds:
+
+- OK: < 10 per 1K
+- WARN: 10-20 per 1K
+- CRITICAL: > 20 per 1K
+
+Baseline from the issue: 8.2 (good) → 21.0 (degraded). These are experimental defaults — see **Thresholds Are Experimental** above. The reasoning-loop patterns use the same word-boundary matching as stop phrases to avoid false positives on `"actually"` inside `"the actually-correct answer"`.
+
