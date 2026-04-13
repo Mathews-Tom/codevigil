@@ -31,6 +31,7 @@ instantiates it for every session.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
@@ -123,6 +124,17 @@ class SessionAggregator:
         collectors_cfg = config.get("collectors", {})
         enabled = collectors_cfg.get("enabled", [])
         self._enabled_collectors: tuple[str, ...] = tuple(enabled)
+        # Tracks paths for which the "invalid layout" WARN has already been
+        # emitted so the message fires once per distinct path per process,
+        # not once per tick or per session that shares the same bad path.
+        self._warned_invalid_paths: set[str] = set()
+        # Eviction churn: number of sessions evicted in the most recent tick.
+        # Reset to 0 at the start of each tick. Phase 3's reducer reads this
+        # to detect flapping watcher roots or short-lived session bursts.
+        self._eviction_churn: int = 0
+        # Cohort size: number of live (non-evicted) sessions at the end of
+        # the most recent tick. Callers may read either property between ticks.
+        self._cohort_size: int = 0
 
     # --------------------------------------------------------------- properties
 
@@ -131,6 +143,29 @@ class SessionAggregator:
         """Read-only-ish accessor used by tests; do not mutate externally."""
 
         return self._sessions
+
+    @property
+    def eviction_churn(self) -> int:
+        """Sessions evicted during the most recent :meth:`tick` call.
+
+        Reset to 0 at the start of each tick. Phase 3's reducer uses this
+        to detect flapping watcher roots (sustained high churn) and
+        short-lived session bursts. A value of ``0`` is normal for stable
+        watch loops.
+        """
+
+        return self._eviction_churn
+
+    @property
+    def cohort_size(self) -> int:
+        """Live (non-evicted) session count at the end of the most recent tick.
+
+        Includes both ``ACTIVE`` and ``STALE`` sessions — anything that has
+        not yet been evicted. Phase 3's reducer uses this as the denominator
+        for fleet-level metric aggregation.
+        """
+
+        return self._cohort_size
 
     # ----------------------------------------------------------------- tick API
 
@@ -141,8 +176,13 @@ class SessionAggregator:
         lifecycle pass over every known session. Doing the source pass first
         means an APPEND received in the same tick that would have crossed
         the STALE threshold counts as activity and keeps the session ACTIVE.
+
+        After each tick the :attr:`eviction_churn` and :attr:`cohort_size`
+        properties are updated so callers can observe fleet composition
+        without introspecting the private ``_sessions`` dict.
         """
 
+        self._eviction_churn = 0
         for source_event in self._source.poll():
             self._dispatch_source_event(source_event)
         self._run_lifecycle_pass()
@@ -153,6 +193,7 @@ class SessionAggregator:
                 continue
             snapshots = self._snapshot_session(ctx)
             results.append((self._build_meta(ctx), snapshots))
+        self._cohort_size = len(results)
         return iter(results)
 
     def close(self) -> None:
@@ -220,38 +261,44 @@ class SessionAggregator:
         self._sessions[sid] = ctx
         return ctx
 
-    @staticmethod
-    def _extract_project_hash(path: Path, *, session_id: str) -> str:
+    def _extract_project_hash(self, path: Path, *, session_id: str) -> str:
         """Pull the project-hash directory from the canonical path layout.
 
         Layout is ``~/.claude/projects/<project-hash>/sessions/<id>.jsonl``;
         we walk parents until we find one named ``projects`` and return
-        the directory immediately under it. Anything else logs an INFO
-        record with ``code=aggregator.project_layout_unknown`` and
-        falls back to the empty string. The INFO level distinguishes
-        "valid layout, hash extracted, but project not in registry"
-        (silent — handled downstream by ``project_registry.resolve``)
-        from "path does not follow the documented layout at all"
-        (noisy in the log, so a misconfigured watcher root is visible).
+        the directory immediately under it.
+
+        When the path does not follow the documented layout, emits a WARN
+        once per distinct invalid path (tracked in
+        ``self._warned_invalid_paths``) so a misconfigured watcher root is
+        visible without flooding the log. Falls back to a deterministic
+        16-hex-char SHA-256 prefix of the raw path string so callers always
+        get a non-empty, stable hash even for unrecognised layouts — the
+        empty-string fallback caused silent downstream failures when code
+        keyed on project_hash assumed it was non-empty.
         """
 
         parts = path.parts
         for index, part in enumerate(parts):
             if part == "projects" and index + 1 < len(parts):
                 return parts[index + 1]
-        record(
-            CodevigilError(
-                level=ErrorLevel.INFO,
-                source=ErrorSource.AGGREGATOR,
-                code="aggregator.project_layout_unknown",
-                message=(
-                    f"session path {str(path)!r} does not contain a "
-                    f"'projects/<hash>' segment; project name will be None"
-                ),
-                context={"session_id": session_id, "path": str(path)},
+        raw = str(path)
+        if raw not in self._warned_invalid_paths:
+            self._warned_invalid_paths.add(raw)
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.AGGREGATOR,
+                    code="aggregator.project_layout_unknown",
+                    message=(
+                        f"session path {raw!r} does not contain a "
+                        f"'projects/<hash>' segment; falling back to "
+                        f"path-derived hash, project name will be None"
+                    ),
+                    context={"session_id": session_id, "path": raw},
+                )
             )
-        )
-        return ""
+        return hashlib.sha256(raw.encode()).hexdigest()[:16]
 
     def _instantiate_collectors(self, parser: SessionParser) -> dict[str, Collector]:
         """Build the per-session collector dict from the registry.
@@ -506,6 +553,7 @@ class SessionAggregator:
         if ctx is None:
             return
         ctx.state = SessionState.EVICTED
+        self._eviction_churn += 1
         # Session churn is operationally interesting: a flapping
         # watcher or a chatty editor that rolls files every few minutes
         # shows up as an elevated eviction rate in the INFO log.

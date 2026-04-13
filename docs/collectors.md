@@ -74,12 +74,12 @@ The primary scalar is `read_edit_ratio = reads / max(mutations, 1)`. Secondary m
 
 ### Severity
 
-| Condition                                            | Severity                     |
-| ---------------------------------------------------- | ---------------------------- |
-| Window has fewer than 10 classified events           | OK with label `"warming up"` |
-| `read_edit_ratio < critical_threshold` (default 2.0) | CRITICAL                     |
-| `read_edit_ratio < warn_threshold` (default 4.0)     | WARN                         |
-| Otherwise                                            | OK                           |
+| Condition                                                                              | Severity                     |
+| -------------------------------------------------------------------------------------- | ---------------------------- |
+| Fewer than `min_events_for_severity` (default 10) classified events seen               | OK with label `"warming up"` |
+| `read_edit_ratio < critical_threshold` (default 2.0)                                   | CRITICAL                     |
+| `read_edit_ratio < warn_threshold` (default 4.0)                                       | WARN                         |
+| Otherwise                                                                              | OK                           |
 
 ### Blind-edit detection
 
@@ -175,11 +175,12 @@ The primary scalar is `loop_rate = hits * 1000 / max(tool_calls, 1)` — self-co
 
 ### Severity
 
-| Condition                                       | Severity |
-| ----------------------------------------------- | -------- |
-| `loop_rate ≥ critical_threshold` (default 20.0) | CRITICAL |
-| `loop_rate ≥ warn_threshold` (default 10.0)     | WARN     |
-| Otherwise                                       | OK       |
+| Condition                                                                       | Severity |
+| ------------------------------------------------------------------------------- | -------- |
+| Fewer than `min_tool_calls_for_severity` (default 20) tool calls seen           | OK       |
+| `loop_rate ≥ critical_threshold` (default 20.0)                                 | CRITICAL |
+| `loop_rate ≥ warn_threshold` (default 10.0)                                     | WARN     |
+| Otherwise                                                                       | OK       |
 
 ### What to do on WARN / CRITICAL
 
@@ -209,13 +210,13 @@ The primary scalar is `parse_confidence` — a float in `[0.0, 1.0]`. The detail
 
 ### Severity
 
-| Condition                                   | Severity |
-| ------------------------------------------- | -------- |
-| `total_lines < 50` (window not yet full)    | OK       |
-| `parse_confidence < 0.9` and window is full | CRITICAL |
-| Otherwise                                   | OK       |
+| Condition                                                                              | Severity |
+| -------------------------------------------------------------------------------------- | -------- |
+| `total_lines < 50` (window not yet full)                                               | OK       |
+| `parse_confidence < critical_threshold` (default `0.9`) and window is full            | CRITICAL |
+| Otherwise                                                                              | OK       |
 
-The 50-line window is hardcoded and matches the design's drift-detection rule. The CRITICAL boundary is `0.9`: more than 10% of input lines failing to parse is the threshold past which derived metrics from the user-facing collectors should not be trusted.
+The 50-line window is hardcoded and matches the design's drift-detection rule. The CRITICAL boundary defaults to `0.9` (configurable via `collectors.parse_health.critical_threshold`): more than 10 % of input lines failing to parse is the default threshold past which derived metrics from the user-facing collectors should not be trusted. Projects with known-noisy wire formats can relax this value in `config.toml` without needing to patch the collector.
 
 ### Why it cannot be disabled
 
