@@ -1,0 +1,55 @@
+{"type": "assistant", "timestamp": "2026-01-01T00:00:00+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 0"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:01+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 1"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:02+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 2"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:03+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 3"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:04+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 4"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:05+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 5"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:06+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 6"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:07+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 7"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:08+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 8"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:09+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 9"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:10+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 10"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:11+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 11"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:12+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 12"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:13+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 13"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:14+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 14"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:15+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 15"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:16+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 16"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:17+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 17"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:18+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 18"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:19+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 19"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:20+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 20"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:21+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 21"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:22+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 22"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:23+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 23"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:24+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 24"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:25+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 25"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:26+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 26"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:27+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 27"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:28+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 28"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:29+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 29"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:30+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 30"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:31+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 31"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:32+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 32"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:33+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 33"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:34+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 34"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:35+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 35"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:36+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 36"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:37+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 37"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:38+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 38"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:39+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 39"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:40+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 40"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:41+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 41"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:42+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 42"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:43+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 43"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:00:44+00:00", "session_id": "fixture-schema-drift", "message": {"content": [{"type": "text", "text": "step 44"}]}}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:00+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:01+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:02+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:03+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:04+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:05+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:06+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:07+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:08+00:00", "session_id": "fixture-schema-drift", "broken": true}
+{"type": "assistant", "timestamp": "2026-01-01T00:01:09+00:00", "session_id": "fixture-schema-drift", "broken": true}

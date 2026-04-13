@@ -1,0 +1,21 @@
+{"type":"system","timestamp":"2026-01-01T00:00:00+00:00","session_id":"fixture-healthy","subtype":"session_start"}
+{"type":"user","timestamp":"2026-01-01T00:00:01+00:00","session_id":"fixture-healthy","message":{"content":"refactor the auth module"}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:02+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"text","text":"reading the auth module before changing it"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/home/user/proj/auth.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:03+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"def login(): ..."}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:04+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Read","input":{"file_path":"/home/user/proj/session.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:05+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"class Session: ..."}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:06+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-3","name":"Read","input":{"file_path":"/home/user/proj/tokens.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:07+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-3","content":"TOKEN_TTL = 900"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:08+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-4","name":"Grep","input":{"pattern":"login","file_path":"/home/user/proj"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:09+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-4","content":"3 matches"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:10+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-5","name":"Read","input":{"file_path":"/home/user/proj/login.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:11+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-5","content":"login impl"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:12+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-6","name":"Read","input":{"file_path":"/home/user/proj/logout.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:13+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-6","content":"logout impl"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:14+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-7","name":"Read","input":{"file_path":"/home/user/proj/middleware.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:15+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-7","content":"middleware impl"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:15+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_use","id":"tool-7b","name":"Read","input":{"file_path":"/home/user/proj/cookies.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:15+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-7b","content":"cookie impl"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:16+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"text","text":"now applying the targeted edit"},{"type":"tool_use","id":"tool-8","name":"Edit","input":{"file_path":"/home/user/proj/auth.py","old_string":"return None","new_string":"return user"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:17+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"tool_result","tool_use_id":"tool-8","content":"edit applied"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:18+00:00","session_id":"fixture-healthy","message":{"content":[{"type":"text","text":"all set, the refactor is complete"}]}}

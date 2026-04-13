@@ -1,0 +1,24 @@
+{"type":"system","timestamp":"2026-01-01T00:00:00+00:00","session_id":"fixture-degraded-re","subtype":"session_start"}
+{"type":"user","timestamp":"2026-01-01T00:00:01+00:00","session_id":"fixture-degraded-re","message":{"content":"apply the fix from the bug report"}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:02+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/home/user/proj/handler.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:03+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"def handle(): ..."}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:04+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Edit","input":{"file_path":"/home/user/proj/handler.py","old_string":"a","new_string":"b"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:05+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:06+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-3","name":"Edit","input":{"file_path":"/home/user/proj/handler.py","old_string":"b","new_string":"c"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:07+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-3","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:08+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-4","name":"Edit","input":{"file_path":"/home/user/proj/util.py","old_string":"x","new_string":"y"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:09+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-4","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:10+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-5","name":"Write","input":{"file_path":"/home/user/proj/new.py","content":"new"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:11+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-5","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:12+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-6","name":"Read","input":{"file_path":"/home/user/proj/other.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:13+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-6","content":"def other(): ..."}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:14+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-7","name":"Edit","input":{"file_path":"/home/user/proj/other.py","old_string":"p","new_string":"q"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:15+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-7","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:16+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-8","name":"Edit","input":{"file_path":"/home/user/proj/other.py","old_string":"q","new_string":"r"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:17+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-8","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:18+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-9","name":"Write","input":{"file_path":"/home/user/proj/another.py","content":"x"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:19+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-9","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:20+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-10","name":"Edit","input":{"file_path":"/home/user/proj/another.py","old_string":"x","new_string":"y"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:21+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-10","content":"ok"}]}}
+{"type":"assistant","timestamp":"2026-01-01T00:00:22+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_use","id":"tool-11","name":"MultiEdit","input":{"file_path":"/home/user/proj/handler.py"}}]}}
+{"type":"user","timestamp":"2026-01-01T00:00:23+00:00","session_id":"fixture-degraded-re","message":{"content":[{"type":"tool_result","tool_use_id":"tool-11","content":"ok"}]}}
