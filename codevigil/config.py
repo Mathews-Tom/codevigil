@@ -41,6 +41,12 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     },
     "collectors": {
         "enabled": ["read_edit_ratio", "stop_phrase", "reasoning_loop"],
+        "parse_health": {
+            # parse_health is a built-in always-on integrity collector.
+            # The validator refuses any layer that flips this flag to
+            # false — see ``_validate_parse_health_undisableable``.
+            "enabled": True,
+        },
         "read_edit_ratio": {
             "window_size": 50,
             "warn_threshold": 4.0,
@@ -592,6 +598,29 @@ def _validate_resolved(values: dict[str, Any]) -> None:
         kind="renderer",
     )
     _validate_output_format(values)
+    _validate_parse_health_undisableable(values)
+
+
+def _validate_parse_health_undisableable(values: dict[str, Any]) -> None:
+    """Refuse any config layer that tries to disable ``parse_health``.
+
+    ``parse_health`` is the parser-drift integrity collector. Allowing it
+    to be disabled would let a user silence the only signal that catches
+    a silent Claude Code schema break, which defeats the design goal of
+    treating drift as a first-class observable.
+    """
+
+    enabled = _read_dotted_optional(values, "collectors.parse_health.enabled")
+    if enabled is _MISSING or enabled is True:
+        return
+    raise ConfigError(
+        code="config.parse_health_undisableable",
+        message=(
+            "collectors.parse_health.enabled cannot be set to false; "
+            "parse_health is a built-in always-on integrity collector"
+        ),
+        context={"key": "collectors.parse_health.enabled", "value": enabled},
+    )
 
 
 def _validate_range(
