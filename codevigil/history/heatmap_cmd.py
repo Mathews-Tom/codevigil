@@ -1,18 +1,12 @@
 """``codevigil history heatmap <SESSION_ID>`` -- tool x severity matrix.
 
-This subcommand is gated entirely behind the ``rich`` optional extra. When
-``rich`` is absent the command prints an install hint and exits 2.
-
 The heatmap renders a ``rich.table.Table`` where:
-- Rows are tool names (derived from metric names in the session report).
+- Rows are metric names from the session report.
 - Columns are severity labels (``ok``, ``warn``, ``crit``).
-- Cells show the metric value for that (tool, severity) intersection, or
-  ``-`` when the metric is not present or has a different severity.
+- Cells show the metric value for that (metric, severity) intersection, or
+  ``—`` when the metric falls in a different severity bucket.
 
-Since ``SessionReport`` stores only per-session scalar metric values (not
-per-tool-call breakdowns), the matrix is a one-row-per-metric summary that
-maps each metric to its severity bucket. The "heatmap" metaphor is
-preserved through color: ok=green, warn=yellow, crit=red cells.
+Color: ok=green, warn=yellow, crit=red cells.
 """
 
 from __future__ import annotations
@@ -21,10 +15,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from codevigil.history import RICH
-from codevigil.history.filters import classify_metric_severity
+import rich.console
+import rich.table
 
-_RICH_INSTALL_MSG = "rich extra not installed — run: uv add 'codevigil[rich]'\n"
+from codevigil.analysis.store import SessionReport, SessionStore
+from codevigil.history.filters import classify_metric_severity
 
 
 def run_heatmap(
@@ -36,8 +31,6 @@ def run_heatmap(
 ) -> int:
     """Render a tool x severity heatmap for a single session.
 
-    Exits 2 when ``rich`` is not installed.
-
     Parameters:
         session_id: Session id to render.
         store_dir: Override the default ``SessionStore`` directory.
@@ -45,19 +38,12 @@ def run_heatmap(
         err: Error stream. Defaults to ``sys.stderr``.
 
     Returns:
-        ``0`` on success, ``1`` when session not found, ``2`` when
-        ``rich`` is absent.
+        ``0`` on success, ``1`` when session not found.
     """
     if out is None:
         out = sys.stdout
     if err is None:
         err = sys.stderr
-
-    if RICH is None:
-        err.write(_RICH_INSTALL_MSG)
-        return 2
-
-    from codevigil.analysis.store import SessionStore
 
     store = SessionStore(base_dir=store_dir)
     report = store.get_report(session_id)
@@ -65,15 +51,12 @@ def run_heatmap(
         out.write(f"session not found: {session_id!r}\n")
         return 1
 
-    _render_heatmap_rich(report, out=out)
+    _render_heatmap(report, out=out)
     return 0
 
 
-def _render_heatmap_rich(report: Any, *, out: Any) -> None:
-    import rich.console
-    import rich.table
-
-    console = rich.console.Console(file=out)
+def _render_heatmap(report: SessionReport, *, out: Any) -> None:
+    console = rich.console.Console(file=out, highlight=False)
 
     tbl = rich.table.Table(
         title=f"Heatmap: {report.session_id}",

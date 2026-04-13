@@ -4,17 +4,11 @@ Renders a single ``SessionReport`` with:
 
 1. Header block — session id, project, model, permission_mode, started_at,
    duration, final severity.
-2. Event timeline — collapsed counts per event type (always), plus a
-   note that the raw JSONL carries the full stream.
-3. Metric trajectory — for each metric, shows the final value and severity.
-   Full snapshot trajectory is not stored in ``SessionReport``; only the
-   final scalar is available from the store.
-4. Stop-phrase context snippets — reads ``recent_hits[].context_snippet``
+2. Metric trajectory — for each metric, shows the final value and severity.
+3. Stop-phrase context snippets — reads ``recent_hits[].context_snippet``
    from the ``stop_phrase`` metric detail when present.
 
-With ``rich`` installed, wraps sections in ``rich.panel.Panel`` and uses
-``rich.table.Table`` for the metric section. Without ``rich``, emits plain
-Markdown. Both paths render the same information.
+Uses ``rich`` throughout: panels for sections, a table for the metric rows.
 """
 
 from __future__ import annotations
@@ -23,15 +17,19 @@ import sys
 from pathlib import Path
 from typing import Any
 
+import rich.console
+import rich.panel
+import rich.table
+
 from codevigil.analysis.store import SessionReport, SessionStore
-from codevigil.history import RICH
 from codevigil.history.filters import (
-    SeverityLabel,
     classify_metric_severity,
     format_duration,
     format_started_at,
     severity_of_report,
 )
+
+_SEV_STYLE: dict[str, str] = {"ok": "green", "warn": "yellow", "crit": "red"}
 
 
 def run_detail(
@@ -60,32 +58,17 @@ def run_detail(
         out.write(f"session not found: {session_id!r}\n")
         return 1
 
-    if RICH is not None:
-        _render_rich(report, out=out)
-    else:
-        _render_markdown(report, out=out)
-
+    _render(report, out=out)
     return 0
 
 
-# ---------------------------------------------------------------------------
-# rich renderer
-# ---------------------------------------------------------------------------
-
-
-def _render_rich(report: SessionReport, *, out: Any) -> None:
-    """Render using rich.panel.Panel and rich.table.Table."""
-    import rich.console
-    import rich.panel
-    import rich.table
-
-    console = rich.console.Console(file=out)
+def _render(report: SessionReport, *, out: Any) -> None:
+    console = rich.console.Console(file=out, highlight=False)
 
     # --- header panel ---
-    header_lines = _header_lines(report)
     console.print(
         rich.panel.Panel(
-            "\n".join(header_lines),
+            "\n".join(_header_lines(report)),
             title=f"[bold]Session: {report.session_id}[/bold]",
             expand=False,
         )
@@ -99,13 +82,13 @@ def _render_rich(report: SessionReport, *, out: Any) -> None:
 
     for name, value in sorted(report.metrics.items()):
         sev = classify_metric_severity(name, value)
-        sev_style = _sev_style(sev)
+        sev_style = _SEV_STYLE.get(sev, "white")
         tbl.add_row(name, f"{value:.4f}", f"[{sev_style}]{sev}[/{sev_style}]")
 
     console.print(tbl)
 
     # --- stop-phrase snippets ---
-    snippets = _extract_stop_phrase_snippets(report)
+    snippets = _extract_stop_phrase_snippets()
     if snippets:
         snip_text = "\n".join(f"  [{i + 1}] {s}" for i, s in enumerate(snippets))
         console.print(
@@ -115,48 +98,6 @@ def _render_rich(report: SessionReport, *, out: Any) -> None:
                 expand=False,
             )
         )
-
-
-def _sev_style(sev: SeverityLabel) -> str:
-    return {"ok": "green", "warn": "yellow", "crit": "red"}.get(sev, "white")
-
-
-# ---------------------------------------------------------------------------
-# plain Markdown renderer
-# ---------------------------------------------------------------------------
-
-
-def _render_markdown(report: SessionReport, *, out: Any) -> None:
-    lines: list[str] = []
-
-    lines.append(f"# Session: {report.session_id}")
-    lines.append("")
-    lines.extend(_header_lines(report))
-    lines.append("")
-
-    lines.append("## Metrics")
-    lines.append("")
-    lines.append("| metric | value | severity |")
-    lines.append("| --- | --- | --- |")
-    for name, value in sorted(report.metrics.items()):
-        sev = classify_metric_severity(name, value)
-        lines.append(f"| {name} | {value:.4f} | {sev} |")
-    lines.append("")
-
-    snippets = _extract_stop_phrase_snippets(report)
-    if snippets:
-        lines.append("## Stop-Phrase Context Snippets")
-        lines.append("")
-        for i, snip in enumerate(snippets):
-            lines.append(f"{i + 1}. {snip}")
-        lines.append("")
-
-    out.write("\n".join(lines))
-
-
-# ---------------------------------------------------------------------------
-# Shared helpers
-# ---------------------------------------------------------------------------
 
 
 def _header_lines(report: SessionReport) -> list[str]:
@@ -174,16 +115,14 @@ def _header_lines(report: SessionReport) -> list[str]:
     ]
 
 
-def _extract_stop_phrase_snippets(report: SessionReport) -> list[str]:
-    """Extract ``context_snippet`` strings from the stop_phrase detail dict.
+def _extract_stop_phrase_snippets() -> list[str]:
+    """Extract ``context_snippet`` strings from the stop_phrase detail.
 
-    Returns an empty list when the metric is absent, the detail is not
-    a dict, or ``recent_hits`` is missing or empty.
+    Returns an empty list: ``SessionReport`` stores only the final float
+    scalar; the context_snippet data lives in the collector's
+    ``MetricSnapshot.detail``, which is not persisted to the store.
+    When the store gains richer snapshot persistence, update here.
     """
-    # SessionReport only stores the final float scalar in .metrics; the
-    # context_snippet data lives in the collector's MetricSnapshot.detail,
-    # which is not persisted to the store. We surface what is available.
-    # When the store gains richer snapshot persistence, update here.
     return []
 
 

@@ -1,9 +1,9 @@
 """``codevigil history list`` renderer.
 
 Reads all sessions from the ``SessionStore``, applies the caller-supplied
-filters, and renders a compact Markdown table to stdout. No per-row disk
-reads after the initial store enumeration — the entire filtered list is
-built in memory before any rendering occurs.
+filters, and renders a rich table to stdout. No per-row disk reads after
+the initial store enumeration — the entire filtered list is built in memory
+before any rendering occurs.
 
 Columns:
 - ``session_id`` — short form (12-char truncation after stripping ``agent-``)
@@ -23,7 +23,10 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-from codevigil.analysis.store import SessionStore
+import rich.console
+import rich.table
+
+from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.history.filters import (
     SeverityLabel,
     apply_filters,
@@ -33,6 +36,8 @@ from codevigil.history.filters import (
     short_id,
     top_metrics_summary,
 )
+
+_SEV_STYLE: dict[str, str] = {"ok": "green", "warn": "yellow", "crit": "red"}
 
 
 def run_list(
@@ -47,7 +52,7 @@ def run_list(
     thresholds: dict[str, tuple[float, float]] | None = None,
     out: Any = None,
 ) -> int:
-    """Enumerate the store, apply filters, render Markdown table.
+    """Enumerate the store, apply filters, render rich table.
 
     Parameters:
         store_dir: Override the default ``SessionStore`` directory. Passed
@@ -71,7 +76,6 @@ def run_list(
         out = sys.stdout
 
     store = SessionStore(base_dir=store_dir)
-    # Single enumeration pass — no per-row disk reads after this.
     all_reports = store.list_reports()
 
     filtered = apply_filters(
@@ -85,55 +89,44 @@ def run_list(
         thresholds=thresholds,
     )
 
-    out.write(_render_table(filtered))
+    console = rich.console.Console(file=out, highlight=False)
+    console.print(_build_table(filtered))
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Renderer
-# ---------------------------------------------------------------------------
-
-_HEADERS = [
-    "session_id",
-    "project",
-    "started_at",
-    "duration",
-    "severity",
-    "model",
-    "permission_mode",
-    "metrics_summary",
-]
-
-
-def _render_table(reports: list[Any]) -> str:
-    """Render a Markdown table from the filtered report list."""
-    lines: list[str] = []
-    lines.append("| " + " | ".join(_HEADERS) + " |")
-    lines.append("| " + " | ".join("---" for _ in _HEADERS) + " |")
+def _build_table(reports: list[SessionReport]) -> rich.table.Table:
+    tbl = rich.table.Table(show_header=True, header_style="bold")
+    tbl.add_column("session_id")
+    tbl.add_column("project")
+    tbl.add_column("started_at")
+    tbl.add_column("duration", justify="right")
+    tbl.add_column("severity", justify="center")
+    tbl.add_column("model")
+    tbl.add_column("permission_mode")
+    tbl.add_column("metrics_summary")
 
     for report in reports:
         project_display = report.project_name or report.project_hash or "—"
         started = format_started_at(report.started_at)
         duration = format_duration(report.duration_seconds)
         sev = severity_of_report(report)
+        sev_style = _SEV_STYLE.get(sev, "default")
         model_display = report.model or "—"
         pmode_display = report.permission_mode or "—"
         metrics_col = top_metrics_summary(report.metrics, n=2)
 
-        row = [
+        tbl.add_row(
             short_id(report.session_id),
             project_display,
             started,
             duration,
-            sev,
+            f"[{sev_style}]{sev}[/{sev_style}]",
             model_display,
             pmode_display,
             metrics_col,
-        ]
-        lines.append("| " + " | ".join(row) + " |")
+        )
 
-    lines.append("")
-    return "\n".join(lines)
+    return tbl
 
 
 __all__ = ["run_list"]

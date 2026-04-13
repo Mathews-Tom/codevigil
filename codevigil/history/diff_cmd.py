@@ -1,11 +1,7 @@
 """``codevigil history diff A B`` renderer.
 
-Aligns two sessions by LCS over their event-type sequences (conceptual —
-since ``SessionReport`` stores only the final aggregates, not the raw event
-stream, alignment is performed over the sorted metric name sequence as a
-proxy). Renders a side-by-side Markdown comparison table.
-
-The diff is stdlib-only — ``rich`` adds nothing here and is NOT used.
+Aligns two sessions by LCS over their sorted metric name sequence and
+renders a rich side-by-side comparison.
 
 Header block compares:
 - project, model, permission_mode
@@ -27,9 +23,13 @@ insertion order in the store).
 from __future__ import annotations
 
 import difflib
+import io
 import sys
 from pathlib import Path
 from typing import Any
+
+import rich.console
+import rich.table
 
 from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.history.filters import (
@@ -74,29 +74,30 @@ def run_diff(
             out.write(f"session not found: {sid!r}\n")
         return 1
 
-    out.write(_render_diff(report_a, report_b))  # type: ignore[arg-type]
+    console = rich.console.Console(file=out, highlight=False)
+    _render_diff_to_console(report_a, report_b, console=console)  # type: ignore[arg-type]
     return 0
 
 
-# ---------------------------------------------------------------------------
-# Renderer
-# ---------------------------------------------------------------------------
-
-
 def _render_diff(a: SessionReport, b: SessionReport) -> str:
-    lines: list[str] = []
+    """Return the diff as a plain-text string (used by unit tests)."""
+    buf = io.StringIO()
+    console = rich.console.Console(file=buf, force_terminal=False, highlight=False)
+    _render_diff_to_console(a, b, console=console)
+    return buf.getvalue()
 
-    lines.append("# Session Diff")
-    lines.append("")
 
-    # Header comparison table
-    lines.append("## Header Comparison")
-    lines.append("")
-    lines.append("| field | session A | session B |")
-    lines.append("| --- | --- | --- |")
+def _render_diff_to_console(
+    a: SessionReport, b: SessionReport, *, console: rich.console.Console
+) -> None:
+    # --- header comparison table ---
+    header_tbl = rich.table.Table(title="Session Diff — Header", show_header=True)
+    header_tbl.add_column("field", style="bold")
+    header_tbl.add_column("session A")
+    header_tbl.add_column("session B")
 
     def _row(label: str, val_a: str, val_b: str) -> None:
-        lines.append(f"| {label} | {val_a} | {val_b} |")
+        header_tbl.add_row(label, val_a, val_b)
 
     _row("session_id", a.session_id, b.session_id)
     _row(
@@ -120,13 +121,15 @@ def _render_diff(a: SessionReport, b: SessionReport) -> str:
 
     _row("events", str(a.event_count), str(b.event_count))
     _row("severity", severity_of_report(a), severity_of_report(b))
-    lines.append("")
 
-    # Metric diff table aligned via LCS over sorted metric names
-    lines.append("## Metric Diff")
-    lines.append("")
-    lines.append("| metric | value A | value B | delta (B-A) |")
-    lines.append("| --- | --- | --- | --- |")
+    console.print(header_tbl)
+
+    # --- metric diff table aligned via LCS over sorted metric names ---
+    metric_tbl = rich.table.Table(title="Metric Diff", show_header=True)
+    metric_tbl.add_column("metric", style="bold")
+    metric_tbl.add_column("value A", justify="right")
+    metric_tbl.add_column("value B", justify="right")
+    metric_tbl.add_column("delta (B-A)", justify="right")
 
     metrics_a = a.metrics
     metrics_b = b.metrics
@@ -141,21 +144,20 @@ def _render_diff(a: SessionReport, b: SessionReport) -> str:
                 vb = metrics_b[kb]
                 delta = vb - va
                 dsign = "+" if delta >= 0 else ""
-                lines.append(f"| {ka} | {va:.4f} | {vb:.4f} | {dsign}{delta:.4f} |")
-        elif tag in ("replace",):
+                metric_tbl.add_row(ka, f"{va:.4f}", f"{vb:.4f}", f"{dsign}{delta:.4f}")
+        elif tag == "replace":
             for k in keys_a[i1:i2]:
-                lines.append(f"| {k} | {metrics_a[k]:.4f} | _(absent)_ | — |")
+                metric_tbl.add_row(k, f"{metrics_a[k]:.4f}", "(absent)", "—")
             for k in keys_b[j1:j2]:
-                lines.append(f"| {k} | _(absent)_ | {metrics_b[k]:.4f} | — |")
+                metric_tbl.add_row(k, "(absent)", f"{metrics_b[k]:.4f}", "—")
         elif tag == "delete":
             for k in keys_a[i1:i2]:
-                lines.append(f"| {k} | {metrics_a[k]:.4f} | _(absent)_ | — |")
+                metric_tbl.add_row(k, f"{metrics_a[k]:.4f}", "(absent)", "—")
         elif tag == "insert":
             for k in keys_b[j1:j2]:
-                lines.append(f"| {k} | _(absent)_ | {metrics_b[k]:.4f} | — |")
+                metric_tbl.add_row(k, "(absent)", f"{metrics_b[k]:.4f}", "—")
 
-    lines.append("")
-    return "\n".join(lines)
+    console.print(metric_tbl)
 
 
 __all__ = ["run_diff"]
