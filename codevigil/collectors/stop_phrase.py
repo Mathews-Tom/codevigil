@@ -27,6 +27,7 @@ from codevigil.collectors._text_match import (
     compile_phrase_table,
 )
 from codevigil.config import CONFIG_DEFAULTS
+from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.types import Event, EventKind, MetricSnapshot, Severity
 
 # Default phrase table. Each entry carries an ``intent`` annotation so
@@ -123,6 +124,25 @@ DEFAULT_PHRASES: tuple[PhraseSpec, ...] = (
 _RECENT_HITS_CAP: int = 5
 
 
+def _record_skipped_phrase(message: str, context: dict[str, Any]) -> None:
+    """Emit a WARN on the error channel for a dropped custom phrase.
+
+    Shared by the two skip paths in :func:`_coerce_custom_phrases`
+    (missing ``text`` field and unsupported entry type) so the error
+    shape stays consistent.
+    """
+
+    record(
+        CodevigilError(
+            level=ErrorLevel.WARN,
+            source=ErrorSource.COLLECTOR,
+            code="stop_phrase.custom_phrase_skipped",
+            message=message,
+            context=context,
+        )
+    )
+
+
 def _coerce_custom_phrases(raw: list[Any]) -> list[PhraseSpec]:
     """Translate the config list into typed :class:`PhraseSpec` entries.
 
@@ -130,7 +150,9 @@ def _coerce_custom_phrases(raw: list[Any]) -> list[PhraseSpec]:
     default to ``word`` mode and the ``custom`` category; tables may set
     any of ``text``, ``mode``, ``category``, ``intent``. Unknown modes
     fall back to ``word`` rather than raising - the validator already
-    caught bad shapes at config load time.
+    caught bad shapes at config load time. Malformed entries that slip
+    past the validator (e.g. an in-memory config passed around it) are
+    logged via :func:`_record_skipped_phrase` and dropped.
     """
 
     out: list[PhraseSpec] = []
@@ -141,6 +163,10 @@ def _coerce_custom_phrases(raw: list[Any]) -> list[PhraseSpec]:
         if isinstance(entry, dict):
             text = entry.get("text")
             if not isinstance(text, str):
+                _record_skipped_phrase(
+                    "dropped custom phrase entry with missing or non-string 'text' field",
+                    {"entry_keys": sorted(entry.keys())},
+                )
                 continue
             mode_raw = entry.get("mode", "word")
             mode = mode_raw if mode_raw in {"word", "regex", "substring"} else "word"
@@ -154,6 +180,11 @@ def _coerce_custom_phrases(raw: list[Any]) -> list[PhraseSpec]:
                     intent=intent if isinstance(intent, str) else None,
                 )
             )
+            continue
+        _record_skipped_phrase(
+            f"dropped custom phrase entry of unsupported type {type(entry).__name__!r}",
+            {"entry_type": type(entry).__name__},
+        )
     return out
 
 
@@ -186,6 +217,10 @@ class StopPhraseCollector:
         self._matcher: Matcher = compile_phrase_table(self._phrases)
         self._messages: int = 0
         self._hits: int = 0
+        # Messages that contained at least one stop-phrase hit. The
+        # snapshot value is this / messages so the metric stays bounded
+        # in [0, 1]; the absolute hit count is surfaced in detail.
+        self._messages_with_hit: int = 0
         self._hits_by_category: dict[str, int] = {}
         self._recent_hits: list[dict[str, Any]] = []
 
@@ -203,8 +238,10 @@ class StopPhraseCollector:
             return
         self._messages += 1
         message_index = self._messages
+        message_had_hit = False
         for hit in self._matcher.match(text):
             self._hits += 1
+            message_had_hit = True
             self._hits_by_category[hit.spec.category] = (
                 self._hits_by_category.get(hit.spec.category, 0) + 1
             )
@@ -221,9 +258,16 @@ class StopPhraseCollector:
                 # Drop the oldest entry - we only keep the most recent
                 # five, which is what the design table calls for.
                 self._recent_hits.pop(0)
+        if message_had_hit:
+            self._messages_with_hit += 1
 
     def snapshot(self) -> MetricSnapshot:
-        hit_rate = self._hits / max(self._messages, 1)
+        # Value semantic: fraction of observed assistant messages that
+        # contained at least one stop-phrase hit. Bounded in [0, 1], so
+        # the renderer can threshold or percentile it without worrying
+        # about values exceeding 1.0 when a single message has multiple
+        # hits. Absolute hit count stays in detail for drill-down.
+        hit_rate = self._messages_with_hit / max(self._messages, 1)
         if self._hits >= self._critical_threshold:
             severity = Severity.CRITICAL
         elif self._hits >= self._warn_threshold:
@@ -234,6 +278,7 @@ class StopPhraseCollector:
         detail: dict[str, Any] = {
             "hits": self._hits,
             "messages": self._messages,
+            "messages_with_hit": self._messages_with_hit,
             "hits_by_category": dict(self._hits_by_category),
             "recent_hits": list(self._recent_hits),
             "matcher_mode": self._matcher.mode,
@@ -252,6 +297,7 @@ class StopPhraseCollector:
     def reset(self) -> None:
         self._messages = 0
         self._hits = 0
+        self._messages_with_hit = 0
         self._hits_by_category.clear()
         self._recent_hits.clear()
 
