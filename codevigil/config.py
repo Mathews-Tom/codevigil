@@ -89,6 +89,17 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "sessions": 10,
         "state_path": "~/.local/state/codevigil/bootstrap.json",
     },
+    "storage": {
+        # When false (the default), codevigil watch writes nothing to disk
+        # beyond the log file. Set to true to enable the session-report store
+        # under ~/.local/state/codevigil/sessions/ (XDG_STATE_HOME respected).
+        # The first write logs a single-line activation notice naming the path.
+        "enable_persistence": False,
+        # Minimum number of calendar days a period must span to be included in
+        # cohort output. Periods shorter than this are dropped with a logged
+        # reason. The default of 1 means single-day periods are allowed.
+        "min_observation_days": 1,
+    },
 }
 
 # Known collector and renderer names. These are hardcoded for Phase 2 because
@@ -689,6 +700,13 @@ def _validate_resolved(values: dict[str, Any]) -> None:
     )
     _validate_output_format(values)
     _validate_parse_health_undisableable(values)
+    _validate_range(
+        values,
+        "storage.min_observation_days",
+        minimum=1,
+        maximum=365,
+        kind="int",
+    )
 
 
 def _validate_parse_health_undisableable(values: dict[str, Any]) -> None:
