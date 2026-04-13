@@ -37,6 +37,7 @@ from typing import Any
 from codevigil import __version__
 from codevigil.aggregator import SessionAggregator
 from codevigil.analysis.cohort import VALID_DIMENSIONS
+from codevigil.analysis.store import SessionStore
 from codevigil.bootstrap import BootstrapManager
 from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
 from codevigil.errors import CodevigilError, ErrorLevel
@@ -244,7 +245,14 @@ def _run_watch(args: argparse.Namespace) -> int:
     )
 
     show_badge = _any_experimental_enabled(cfg)
-    renderer = TerminalRenderer(show_experimental_badge=show_badge)
+    storage_cfg = cfg.get("storage", {})
+    baseline_store: SessionStore | None = (
+        SessionStore() if bool(storage_cfg.get("enable_persistence", False)) else None
+    )
+    renderer = TerminalRenderer(
+        show_experimental_badge=show_badge,
+        baseline_store=baseline_store,
+    )
     explain = bool(args.explain)
 
     _install_sigint_handler()
