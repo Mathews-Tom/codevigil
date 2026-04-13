@@ -17,5 +17,6 @@ COLLECTORS: dict[str, type[Collector]] = {}
 # ``parse_health`` collector is always-on and registers itself at import
 # time; later phases append more user-facing collectors here.
 from codevigil.collectors import parse_health as _parse_health  # noqa: E402,F401
+from codevigil.collectors import read_edit_ratio as _read_edit_ratio  # noqa: E402,F401
 
 __all__ = ["COLLECTORS", "register_collector"]
