@@ -1,8 +1,9 @@
 """Read/edit ratio collector.
 
 Classifies tool calls on a rolling deque and surfaces the read-to-mutation
-ratio as the primary scalar, with research/mutation, blind-edit rate, and
-blind-edit tracking confidence carried in ``detail``.
+ratio as the primary scalar, with research/mutation, blind-edit rate,
+blind-edit tracking confidence, and write-vs-edit surgical precision carried
+in ``detail``.
 
 Tool classification table (canonical names from
 :data:`codevigil.parser.TOOL_ALIASES`):
@@ -17,6 +18,18 @@ mutation      ``edit``, ``multi_edit``, ``write``, ``notebook_edit``
 other         everything else (does not influence the ratios)
 ============  ===================================================
 
+Within the mutation category, ``write`` tool calls are distinguished from
+``edit``/``multi_edit``/``notebook_edit`` calls to compute
+``write_precision``: the fraction of mutation calls that are wholesale
+writes rather than surgical edits. Defined as::
+
+    write_precision = write_calls / (write_calls + edit_calls)
+
+where ``edit_calls`` covers ``edit``, ``multi_edit``, and
+``notebook_edit``. This is directly comparable to §4 of the target
+retrospective issue. When no mutation calls have been observed
+``write_precision`` is ``None`` (not 0.0, to avoid implying false data).
+
 The categories follow the v0.1 design table. ``ls`` and ``bash`` and
 ``task`` and friends fall into ``other`` deliberately - they are
 side-effecting but not file-content actions, so counting them as either
@@ -26,9 +39,9 @@ The Collector protocol returns a single :class:`MetricSnapshot` per
 ``snapshot()`` call. We expose the read/edit ratio as the primary scalar
 ``value`` so the renderer has one number to threshold and trend, and
 stash the secondary ratios (research/mutation, blind-edit rate, tracking
-confidence) under ``detail``. Splitting them into separate snapshots
-would require either a Collector protocol change or a wrapper collector,
-neither of which is in scope for v0.1.
+confidence, write_precision) under ``detail``. Splitting them into
+separate snapshots would require either a Collector protocol change or a
+wrapper collector, neither of which is in scope for v0.1.
 """
 
 from __future__ import annotations
@@ -45,6 +58,12 @@ Category = Literal["read", "research", "mutation", "other"]
 _READ_TOOLS: frozenset[str] = frozenset({"read", "view"})
 _RESEARCH_TOOLS: frozenset[str] = frozenset({"grep", "glob", "web_search", "web_fetch"})
 _MUTATION_TOOLS: frozenset[str] = frozenset({"edit", "multi_edit", "write", "notebook_edit"})
+
+# Mutation sub-categories for write_precision computation.
+# ``write`` tools replace file content wholesale; ``edit`` tools make
+# surgical in-place changes. write_precision = write_calls / total_mutations.
+_WRITE_TOOLS: frozenset[str] = frozenset({"write"})
+_EDIT_TOOLS: frozenset[str] = frozenset({"edit", "multi_edit", "notebook_edit"})
 
 
 def _classify(tool_name: str) -> Category:
@@ -113,13 +132,16 @@ class ReadEditRatioCollector:
         # count but bounded by unique files touched in the session.
         self._last_seen_read: dict[str, int] = {}
 
-        # Mutation-side bookkeeping for blind edits and tracking
-        # confidence. These counts persist across the rolling window
-        # because they are session-cumulative; only the per-window
-        # ratios use the deque counts.
+        # Mutation-side bookkeeping for blind edits, tracking
+        # confidence, and write-vs-edit precision. These counts persist
+        # across the rolling window because they are session-cumulative;
+        # only the per-window ratios use the deque counts.
         self._mutations_total: int = 0
         self._mutations_with_path: int = 0
         self._blind_mutations: int = 0
+        # Sub-category counts for write_precision.
+        self._write_calls: int = 0  # "write" tool calls
+        self._edit_calls: int = 0  # "edit", "multi_edit", "notebook_edit"
 
     def ingest(self, event: Event) -> None:
         # Collectors must never raise from ingest. Wrap the body in a
@@ -162,6 +184,11 @@ class ReadEditRatioCollector:
             # When file_path is missing we cannot judge blindness, so
             # we neither count the mutation as blind nor as not-blind.
             # The tracking_confidence ratio drops accordingly.
+            # Track write vs. edit sub-categories for write_precision.
+            if tool_name in _WRITE_TOOLS:
+                self._write_calls += 1
+            elif tool_name in _EDIT_TOOLS:
+                self._edit_calls += 1
         elif category in ("read", "research") and file_path is not None:
             # Record this read/research so a later mutation on the same
             # file can detect it regardless of unrelated tool calls
@@ -212,6 +239,14 @@ class ReadEditRatioCollector:
             severity = Severity.OK
             label = f"R:E {ratio:.1f}"
 
+        # write_precision: write_calls / (write_calls + edit_calls).
+        # None when no mutation sub-category calls observed yet (not 0.0,
+        # to avoid implying a meaningful zero when data is absent).
+        write_edit_total = self._write_calls + self._edit_calls
+        write_precision: float | None = (
+            self._write_calls / write_edit_total if write_edit_total > 0 else None
+        )
+
         detail: dict[str, Any] = {
             "reads": reads,
             "research": research,
@@ -223,6 +258,9 @@ class ReadEditRatioCollector:
                 "value": blind_rate,
                 "tracking_confidence": tracking_confidence,
             },
+            "write_precision": write_precision,
+            "write_calls": self._write_calls,
+            "edit_calls": self._edit_calls,
         }
         if low_confidence:
             # The tracking signal is too thin to threshold; degrade the
@@ -253,6 +291,8 @@ class ReadEditRatioCollector:
         self._mutations_total = 0
         self._mutations_with_path = 0
         self._blind_mutations = 0
+        self._write_calls = 0
+        self._edit_calls = 0
 
 
 def _default_config() -> dict[str, Any]:
