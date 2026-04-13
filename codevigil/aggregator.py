@@ -38,6 +38,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from codevigil.bootstrap import BootstrapManager
 from codevigil.collectors import COLLECTORS
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.parser import SessionParser
@@ -49,6 +50,7 @@ from codevigil.types import (
     MetricSnapshot,
     SessionMeta,
     SessionState,
+    Severity,
 )
 from codevigil.watcher import Source, SourceEvent, SourceEventKind
 
@@ -76,6 +78,7 @@ class _SessionContext:
     last_monotonic: float
     event_count: int = 0
     state: SessionState = SessionState.ACTIVE
+    last_snapshots: dict[str, MetricSnapshot] = field(default_factory=dict)
 
 
 _ClockFn = Callable[[], float]
@@ -100,6 +103,7 @@ class SessionAggregator:
         project_registry: ProjectRegistry | None = None,
         clock: _ClockFn = time.monotonic,
         registry: dict[str, type[Collector]] | None = None,
+        bootstrap: BootstrapManager | None = None,
     ) -> None:
         self._source: Source = source
         self._config: dict[str, Any] = config
@@ -111,6 +115,7 @@ class SessionAggregator:
         )
         self._clock: _ClockFn = clock
         self._sessions: dict[str, _SessionContext] = {}
+        self._bootstrap: BootstrapManager | None = bootstrap
 
         watch_cfg = config.get("watch", {})
         self._stale_after: float = float(watch_cfg.get("stale_after_seconds", 300))
@@ -158,6 +163,11 @@ class SessionAggregator:
         except CodevigilError as err:
             self._record_collector_error(err, collector_name="source", session_id="*")
         for ctx in list(self._sessions.values()):
+            # Take a final snapshot pass so sessions that never reached
+            # EVICTED still contribute to the bootstrap distribution.
+            if self._bootstrap is not None and self._bootstrap.is_active():
+                self._snapshot_session(ctx)
+            self._observe_for_bootstrap(ctx)
             self._reset_collectors(ctx)
         self._sessions.clear()
 
@@ -330,7 +340,9 @@ class SessionAggregator:
         snapshots: list[MetricSnapshot] = []
         for collector_name, collector in ctx.collectors.items():
             try:
-                snapshots.append(collector.snapshot())
+                raw = collector.snapshot()
+                ctx.last_snapshots[collector_name] = raw
+                snapshots.append(self._apply_bootstrap_clamp(collector_name, raw))
             except CodevigilError as err:
                 self._record_collector_error(
                     err,
@@ -356,6 +368,68 @@ class SessionAggregator:
                     session_id=ctx.session_id,
                 )
         return snapshots
+
+    def _apply_bootstrap_clamp(
+        self,
+        collector_name: str,
+        snap: MetricSnapshot,
+    ) -> MetricSnapshot:
+        """Pin severity to OK and tag the label while bootstrap runs.
+
+        ``parse_health`` is the only integrity signal and must keep its
+        real severity; every other collector is still experimental until
+        the bootstrap window closes, so we refuse to let them drive
+        alerts during calibration. The raw snapshot the collector
+        produced is preserved in ``ctx.last_snapshots`` for observation;
+        only the user-visible copy is rewritten.
+        """
+
+        bootstrap = self._bootstrap
+        if bootstrap is None or not bootstrap.is_active():
+            return snap
+        if collector_name == _PARSE_HEALTH_NAME:
+            return snap
+        tag = f"[bootstrap {bootstrap.sessions_observed() + 1}/{bootstrap.target}]"
+        label = f"{snap.label} {tag}" if snap.label else tag
+        return MetricSnapshot(
+            name=snap.name,
+            value=snap.value,
+            label=label,
+            severity=Severity.OK,
+            detail=snap.detail,
+        )
+
+    def _observe_for_bootstrap(self, ctx: _SessionContext) -> None:
+        """Hand the final per-collector snapshots to the bootstrap manager."""
+
+        bootstrap = self._bootstrap
+        if bootstrap is None or not bootstrap.is_active():
+            return
+        payload: dict[str, MetricSnapshot] = {}
+        for collector_name, snap in ctx.last_snapshots.items():
+            if collector_name == _PARSE_HEALTH_NAME:
+                continue
+            payload[collector_name] = snap
+        if not payload:
+            return
+        bootstrap.observe_session(ctx.session_id, payload)
+        if bootstrap.finalize_if_ready():
+            record(
+                CodevigilError(
+                    level=ErrorLevel.INFO,
+                    source=ErrorSource.AGGREGATOR,
+                    code="aggregator.bootstrap_complete",
+                    message=(
+                        f"bootstrap window closed after {bootstrap.sessions_observed()} "
+                        f"sessions; derived thresholds persisted to "
+                        f"{bootstrap.state_path!s}"
+                    ),
+                    context={
+                        "state_path": str(bootstrap.state_path),
+                        "sessions_observed": bootstrap.sessions_observed(),
+                    },
+                )
+            )
 
     def _build_meta(self, ctx: _SessionContext) -> SessionMeta:
         confidence = ctx.parser.stats.parse_confidence
@@ -391,6 +465,7 @@ class SessionAggregator:
         if ctx is None:
             return
         ctx.state = SessionState.EVICTED
+        self._observe_for_bootstrap(ctx)
         self._reset_collectors(ctx)
 
     def _reset_collectors(self, ctx: _SessionContext) -> None:
