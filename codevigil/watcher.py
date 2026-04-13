@@ -43,6 +43,9 @@ from enum import Enum
 from pathlib import Path
 from typing import Protocol, runtime_checkable
 
+from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
+from codevigil.privacy import PrivacyViolationError
+
 _CHUNK_SIZE: int = 1 * 1024 * 1024  # 1 MiB delta read chunk
 
 
@@ -127,7 +130,40 @@ class PollingSource:
     ) -> None:
         self._interval: float = interval
         self._cursors: dict[Path, FileCursor] = {}
-        self._root: Path = root.expanduser().resolve()
+        self._root: Path = self._validate_root(root)
+
+    # ------------------------------------------------------------------ scope
+
+    @staticmethod
+    def _validate_root(root: Path) -> Path:
+        """Resolve the root once and refuse anything outside ``$HOME``.
+
+        Runtime half of the filesystem-scope rule from
+        ``docs/design.md`` §Privacy Enforcement. A CRITICAL error is recorded
+        on the error channel before ``PrivacyViolationError`` is raised so
+        operators see the attempt in the JSONL log even though the constructor
+        also propagates the exception to the caller.
+        """
+
+        resolved_root = root.expanduser().resolve()
+        home = Path.home().resolve()
+        if not resolved_root.is_relative_to(home):
+            err = CodevigilError(
+                level=ErrorLevel.CRITICAL,
+                source=ErrorSource.WATCHER,
+                code="watcher.path_scope_violation",
+                message=(
+                    f"watcher root {str(resolved_root)!r} is outside the user "
+                    f"home directory {str(home)!r}; refusing to walk"
+                ),
+                context={
+                    "root": str(resolved_root),
+                    "home": str(home),
+                },
+            )
+            record(err)
+            raise PrivacyViolationError(err.message)
+        return resolved_root
 
     @property
     def root(self) -> Path:
