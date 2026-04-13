@@ -95,6 +95,10 @@ class ReasoningLoopCollector:
         self._warn_threshold: float = float(cfg["warn_threshold"])
         self._critical_threshold: float = float(cfg["critical_threshold"])
         self._experimental: bool = bool(cfg["experimental"])
+        # Minimum observed tool calls before severity can escalate beyond
+        # OK. Without this gate a single early "actually" on the first
+        # tool call computes to 1000/1k and trips CRITICAL immediately.
+        self._min_tool_calls_for_severity: int = int(cfg["min_tool_calls_for_severity"])
 
         self._matcher: Matcher = compile_phrase_table(list(DEFAULT_PATTERNS))
         self._tool_calls: int = 0
@@ -128,17 +132,24 @@ class ReasoningLoopCollector:
 
     def snapshot(self) -> MetricSnapshot:
         loop_rate = self._matches * 1000.0 / max(self._tool_calls, 1)
-        if loop_rate >= self._critical_threshold:
+        warming_up = self._tool_calls < self._min_tool_calls_for_severity
+        if warming_up:
+            severity = Severity.OK
+            label = f"{loop_rate:.1f}/1k warming up"
+        elif loop_rate >= self._critical_threshold:
             severity = Severity.CRITICAL
+            label = f"{loop_rate:.1f}/1k tool calls"
         elif loop_rate >= self._warn_threshold:
             severity = Severity.WARN
+            label = f"{loop_rate:.1f}/1k tool calls"
         else:
             severity = Severity.OK
-        label = f"{loop_rate:.1f}/1k tool calls"
+            label = f"{loop_rate:.1f}/1k tool calls"
         detail: dict[str, Any] = {
             "matches": self._matches,
             "tool_calls": self._tool_calls,
             "max_burst": self._max_burst,
+            "min_tool_calls_for_severity": self._min_tool_calls_for_severity,
         }
         if self._experimental:
             detail["experimental"] = True
