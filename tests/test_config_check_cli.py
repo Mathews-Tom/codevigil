@@ -80,12 +80,12 @@ def test_bare_invocation_prints_version(
     assert f"codevigil {__version__}" in out
 
 
-def test_unwired_command_reports_not_yet_implemented(
+def test_report_missing_path_argument_is_argparse_error(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """``report`` and ``export`` wiring lands in follow-up changes."""
+    """``codevigil report`` requires a path argument; bare form is rejected."""
 
-    exit_code = main(["export"])
-    assert exit_code == 2
+    with pytest.raises(SystemExit):
+        main(["report"])
     err = capsys.readouterr().err
-    assert "not wired yet" in err
+    assert "path" in err

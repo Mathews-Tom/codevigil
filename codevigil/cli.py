@@ -1,8 +1,7 @@
 """CLI entrypoint and subcommand dispatch.
 
-Wires the ``codevigil`` CLI surface on top of the core pipeline.
-Currently landed: ``config check``, ``watch``, and ``report``. The
-``export`` subcommand is stubbed until its follow-up change.
+Wires the ``codevigil`` CLI surface on top of the core pipeline:
+``config check``, ``watch``, ``report``, and ``export``.
 
 ``report`` enforces the same home-directory path scope the watcher and
 ``JsonFileRenderer`` apply: the resolved output directory must be a
@@ -30,11 +29,11 @@ from codevigil import __version__
 from codevigil.aggregator import SessionAggregator
 from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
 from codevigil.errors import CodevigilError, ErrorLevel
-from codevigil.parser import SessionParser
+from codevigil.parser import SessionParser, parse_session
 from codevigil.privacy import PrivacyViolationError
 from codevigil.projects import ProjectRegistry
 from codevigil.renderers.terminal import TerminalRenderer
-from codevigil.types import MetricSnapshot, Severity
+from codevigil.types import Event, MetricSnapshot, Severity
 from codevigil.watcher import PollingSource
 
 # ---------------------------------------------------------------------------
@@ -98,7 +97,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Override report output directory (must live under $HOME).",
     )
 
-    sub.add_parser("export", help="export mode — wiring lands in a follow-up change.")
+    export_parser = sub.add_parser(
+        "export",
+        help="Stream parsed events as NDJSON on stdout.",
+    )
+    export_parser.add_argument("path", type=str, help="File, directory, or glob pattern.")
 
     return parser
 
@@ -131,13 +134,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return _run_watch(args)
     if args.command == "report":
         return _run_report(args)
-
     if args.command == "export":
-        sys.stderr.write(
-            "ERROR: the 'export' command is not wired yet; it lands in a "
-            "follow-up change. See the development plan for the current scope.\n"
-        )
-        return 2
+        return _run_export(args)
 
     parser.error(f"unknown command {args.command!r}")
     return 2  # pragma: no cover - parser.error raises SystemExit
@@ -554,6 +552,47 @@ def _write_report(path: Path, payload: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as handle:
         handle.write(payload)
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+
+def _run_export(args: argparse.Namespace) -> int:
+    """Dump events as NDJSON on stdout.
+
+    Event serialization shape (one JSON object per line)::
+
+        {"timestamp": "<iso>", "session_id": "<id>", "kind": "<kind>",
+         "payload": {...}}
+
+    Deliberately *different* from ``JsonFileRenderer``: that renderer
+    writes one snapshot row per tick per session with metric values,
+    whereas ``export`` reproduces the parsed event stream so callers can
+    pipe it into ``jq`` and compute their own aggregates.
+    """
+
+    for path in _expand_path_argument(args.path):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for event in parse_session(handle, session_id=path.stem):
+                    sys.stdout.write(_event_to_ndjson_line(event))
+                    sys.stdout.write("\n")
+        except OSError:
+            continue
+    sys.stdout.flush()
+    return 0
+
+
+def _event_to_ndjson_line(event: Event) -> str:
+    record = {
+        "timestamp": event.timestamp.isoformat(),
+        "session_id": event.session_id,
+        "kind": event.kind.value,
+        "payload": dict(event.payload),
+    }
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
 
 
 __all__ = ["main"]
