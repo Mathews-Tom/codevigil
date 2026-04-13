@@ -445,7 +445,7 @@ def test_stop_phrase_context_snippet_in_terminal_output() -> None:
                 "category": "permission_seeking",
                 "phrase": "should I continue",
                 "matched_substring": "should I continue",
-                "context_snippet": "You asked me to fix it. should I continue working on",
+                "context_snippet": "asked me to fix it. should I continue",
                 "intent": "hands the next decision to the user mid-task",
                 "message_index": 3,
             }

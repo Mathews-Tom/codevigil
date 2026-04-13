@@ -2,7 +2,7 @@
 
 Local, privacy-preserving observability for Claude Code sessions.
 
-codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics about reasoning and tool-use patterns, and surfaces them in a terminal dashboard or as JSON / markdown reports. **Stdlib-only runtime, zero network egress, no data ever leaves your machine.**
+codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics about reasoning and tool-use patterns, and surfaces them in a rich terminal dashboard or as JSON / markdown reports. **Zero network egress, no data ever leaves your machine.**
 
 Status: alpha. Python 3.11 and 3.12.
 
@@ -12,9 +12,16 @@ Status: alpha. Python 3.11 and 3.12.
 uv tool install codevigil
 ```
 
-That's it. `uv tool install` puts a `codevigil` executable on your `PATH` in an isolated environment so it does not interfere with your project virtualenvs. To upgrade later, run `uv tool upgrade codevigil`. To remove it, `uv tool uninstall codevigil`.
+`uv tool install` places the `codevigil` executable on your `PATH` inside an isolated environment that does not conflict with project virtualenvs. All subcommands, including the full `history` suite with colored panels and formatted tables, work out of the box.
 
-If you don't have `uv`, install it from <https://docs.astral.sh/uv/getting-started/installation/>, or fall back to `pipx install codevigil` / `pip install --user codevigil`. See [docs/installation.md](docs/installation.md) for every supported path including from-source installs.
+Upgrade and uninstall:
+
+```bash
+uv tool upgrade codevigil
+uv tool uninstall codevigil        # leaves config and session data untouched
+```
+
+No `uv`? Install it from <https://docs.astral.sh/uv/getting-started/installation/>. Fallbacks: `pipx install codevigil` and `pip install --user codevigil` both work. See [docs/installation.md](docs/installation.md) for all supported paths and from-source installs.
 
 ## First run
 
@@ -22,15 +29,15 @@ If you don't have `uv`, install it from <https://docs.astral.sh/uv/getting-start
 codevigil watch
 ```
 
-Tails every active session under `~/.claude/projects` and prints a live multi-session dashboard at one frame per second. Each session shows three metrics — read/edit ratio, stop-phrase hit count, reasoning loop rate — plus a header line with parse confidence and an `[experimental thresholds]` badge while you're still inside the bootstrap window.
+Tails every active session under `~/.claude/projects` and prints a live multi-session dashboard at one frame per second. The top line shows a fleet summary (session count, CRIT/WARN/OK tallies, project count, last-updated timestamp). Each session shows three metrics with inline mini-trends and percentile anchors against your own session history, plus a header with parse confidence and an `[experimental thresholds]` badge while still in the bootstrap window.
 
 ```text
-codevigil [experimental thresholds] | parse_confidence: 1.00
+codevigil [experimental thresholds] | sessions=3 crit=0 warn=1 ok=2 projects=2 updated=2026-04-14T10:22:00 | parse_confidence: 1.00
 session: a3f7c2d | project: my-project | 2m 34s ACTIVE
 ──────────────────────────────────────────────────────────────
-  read_edit_ratio    5.2  OK    [R:E 5.2 | research:mut 7.1]
-  stop_phrase        0    OK    [0 hits]
-  reasoning_loop     6.4  OK    [6.4/1K tool calls | burst: 2]
+  read_edit_ratio    5.2   OK    [R:E 5.2 | research:mut 7.1] [↗3.1→4.2→5.2] [p68 of your baseline]
+  stop_phrase        0     OK    [0 hits]
+  reasoning_loop     6.4   OK    [6.4/1K tool calls | burst: 2] [↘8.1→7.2→6.4] [n/a]
 ──────────────────────────────────────────────────────────────
 ```
 
@@ -39,11 +46,18 @@ session: a3f7c2d | project: my-project | 2m 34s ACTIVE
 ## What else can it do
 
 ```bash
-codevigil config check               # show the resolved config and where each value came from
-codevigil report ~/.claude/projects  # batch report over a tree of session files
+codevigil config check                    # show the resolved config and where each value came from
+codevigil report ~/.claude/projects       # batch report over a tree of session files
 codevigil report sessions/ --format markdown --from 2026-04-01
-codevigil export session.jsonl       # NDJSON event stream on stdout, jq-friendly
+codevigil report ~/.claude/projects --group-by week          # cohort trend table by ISO week
+codevigil report sessions/ --compare-periods 2026-03-01:2026-03-31,2026-04-01:2026-04-30
+codevigil export session.jsonl            # NDJSON event stream on stdout, jq-friendly
 codevigil export session.jsonl | jq 'select(.kind == "tool_call") | .payload.tool_name'
+codevigil history list                    # list stored sessions
+codevigil history list --project my-project --since 2026-04-01 --severity warn
+codevigil history SESSION_ID              # event and metric timeline for one session
+codevigil history diff SESSION_A SESSION_B   # side-by-side Markdown diff of two sessions
+codevigil history heatmap SESSION_ID      # tool × severity heatmap
 ```
 
 Full flag reference for every subcommand: [docs/cli.md](docs/cli.md).
@@ -116,6 +130,7 @@ uv sync --dev
 uv run pytest
 uv run mypy --strict codevigil
 uv run ruff check .
+uv run ruff format --check .
 bash scripts/ci_privacy_grep.sh
 ```
 

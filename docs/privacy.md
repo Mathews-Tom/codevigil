@@ -130,13 +130,13 @@ sudo kill %1
 
 Open `codevigil-traffic.pcap` in Wireshark. There will be no codevigil-originated packets. (You will see traffic from other processes running on your machine; filter by PID if you want only codevigil's, but the simpler check is "no traffic to non-loopback addresses originated by Python during the watch session.")
 
-### Confirm zero runtime dependencies
+### Confirm the runtime dependency footprint
 
 ```bash
 pip show codevigil
 ```
 
-The `Requires` field is empty. codevigil's only runtime imports are stdlib modules — nothing from PyPI, nothing that could change behaviour on a `pip install --upgrade`.
+The `Requires` field lists only `rich>=13`. codevigil's runtime imports are stdlib modules plus `rich` — no networking libraries, no subprocess launchers, nothing that could exfiltrate data. `rich` itself makes no network calls.
 
 ## What to do if you find a violation
 

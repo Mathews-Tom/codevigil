@@ -6,9 +6,7 @@ requires-python = ">=3.11"
 name = "codevigil"
 version = "0.1.1"
 source = { editable = "." }
-
-[package.optional-dependencies]
-rich = [
+dependencies = [
     { name = "rich" },
 ]
 
@@ -22,8 +20,7 @@ dev = [
 ]
 
 [package.metadata]
-requires-dist = [{ name = "rich", marker = "extra == 'rich'", specifier = ">=13" }]
-provides-extras = ["rich"]
+requires-dist = [{ name = "rich", specifier = ">=13" }]
 
 [package.metadata.requires-dev]
 dev = [
