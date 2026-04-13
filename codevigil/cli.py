@@ -1,22 +1,53 @@
 """CLI entrypoint and subcommand dispatch.
 
-Phase 2 wires only the ``config check`` subcommand. ``watch``, ``report``,
-and ``export`` subcommands land in follow-up phases and are currently
-registered as stubs that exit with a clear "not yet implemented" message
-so the CLI surface is discoverable from ``--help`` but cannot accidentally
-be invoked against half-built plumbing.
+Wires the ``codevigil`` CLI surface on top of the core pipeline:
+``config check``, ``watch``, ``report``, and ``export``.
+
+``report`` enforces the same home-directory path scope the watcher and
+``JsonFileRenderer`` apply: the resolved output directory must be a
+descendant of ``Path.home()``, otherwise a ``PrivacyViolationError`` is
+raised and the command exits ``2``. Markdown output is deterministic
+under identical input — sessions sorted by id, metric rows by name, no
+wall-clock timestamps — so golden-file tests are possible.
+
+The global ``--explain`` flag surfaces ``stop_phrase`` collector
+``intent`` annotations in the relevant output channels. It is plumbed as
+a bool that ``watch``, ``report``, and ``export`` each read directly:
+``watch`` annotates the terminal metric label, ``report`` appends intent
+text to the markdown label column and keeps ``recent_hits`` intent in
+the JSON payload, and ``export`` passes through the full event payload.
+Without ``--explain`` the JSON report strips intent fields from
+``recent_hits`` for symmetry with the watcher's non-explain output.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
+import signal
 import sys
-from collections.abc import Sequence
+import time
+from collections.abc import Iterable, Iterator, Sequence
+from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
+from types import FrameType
+from typing import Any
 
 from codevigil import __version__
-from codevigil.config import ConfigError, load_config, render_config_check
+from codevigil.aggregator import SessionAggregator
+from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
 from codevigil.errors import CodevigilError, ErrorLevel
+from codevigil.parser import SessionParser, parse_session
+from codevigil.privacy import PrivacyViolationError
+from codevigil.projects import ProjectRegistry
+from codevigil.renderers.terminal import TerminalRenderer
+from codevigil.types import Event, MetricSnapshot, Severity
+from codevigil.watcher import PollingSource
+
+# ---------------------------------------------------------------------------
+# Argument parser
+# ---------------------------------------------------------------------------
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -31,6 +62,12 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to a TOML config file. Overrides ~/.config/codevigil/config.toml.",
     )
+    parser.add_argument(
+        "--explain",
+        action="store_true",
+        default=False,
+        help="Surface stop_phrase intent annotations in watch/report/export output.",
+    )
 
     sub = parser.add_subparsers(dest="command", required=False)
 
@@ -41,24 +78,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Resolve the effective config and print each value with its source.",
     )
 
-    for name in ("watch", "report", "export"):
-        sub.add_parser(
-            name,
-            help=f"{name} mode — wiring lands in a follow-up change.",
-        )
+    sub.add_parser("watch", help="Live tick loop over ~/.claude/projects session files.")
+
+    report_parser = sub.add_parser(
+        "report",
+        help="Batch analysis over one or more session files.",
+    )
+    report_parser.add_argument("path", type=str, help="File, directory, or glob pattern.")
+    report_parser.add_argument(
+        "--from",
+        dest="from_date",
+        type=str,
+        default=None,
+        help="Filter sessions whose first event is on/after YYYY-MM-DD.",
+    )
+    report_parser.add_argument(
+        "--to",
+        dest="to_date",
+        type=str,
+        default=None,
+        help="Filter sessions whose first event is on/before YYYY-MM-DD.",
+    )
+    report_parser.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="json",
+        help="Output format (default: json).",
+    )
+    report_parser.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Override report output directory (must live under $HOME).",
+    )
+
+    export_parser = sub.add_parser(
+        "export",
+        help="Stream parsed events as NDJSON on stdout.",
+    )
+    export_parser.add_argument("path", type=str, help="File, directory, or glob pattern.")
 
     return parser
 
 
-def _run_config_check(args: argparse.Namespace) -> int:
-    resolved = load_config(config_path=args.config)
-    sys.stdout.write(render_config_check(resolved))
-    return 0
-
-
-def _format_error(err: CodevigilError) -> str:
-    tag = err.level.value.upper()
-    return f"{tag}: {err.code}: {err.message}\n"
+# ---------------------------------------------------------------------------
+# Dispatch
+# ---------------------------------------------------------------------------
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -72,21 +137,554 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "config":
         if args.config_command == "check":
             try:
-                return _run_config_check(args)
+                resolved = load_config(config_path=args.config)
             except ConfigError as err:
                 sys.stderr.write(_format_error(err))
                 return 2 if err.level is ErrorLevel.CRITICAL else 1
+            sys.stdout.write(render_config_check(resolved))
+            return 0
         parser.error(f"unknown config subcommand {args.config_command!r}")
 
-    if args.command in {"watch", "report", "export"}:
-        sys.stderr.write(
-            f"ERROR: the {args.command!r} command is not wired yet; it lands in a "
-            "follow-up change. See the development plan for the current scope.\n"
-        )
-        return 2
+    if args.command == "watch":
+        return _run_watch(args)
+    if args.command == "report":
+        return _run_report(args)
+    if args.command == "export":
+        return _run_export(args)
 
     parser.error(f"unknown command {args.command!r}")
-    return 2  # pragma: no cover — parser.error raises SystemExit
+    return 2  # pragma: no cover - parser.error raises SystemExit
+
+
+def _format_error(err: CodevigilError) -> str:
+    tag = err.level.value.upper()
+    return f"{tag}: {err.code}: {err.message}\n"
+
+
+# ---------------------------------------------------------------------------
+# watch
+# ---------------------------------------------------------------------------
+
+
+_shutdown_requested: bool = False
+
+
+def _install_sigint_handler() -> None:
+    """Install a SIGINT handler that flips ``_shutdown_requested``.
+
+    The handler only sets a module-level flag; the watch loop polls the
+    flag after each tick and exits cleanly. Tests substitute their own
+    flag flip via ``monkeypatch``.
+    """
+
+    def _handler(_signum: int, _frame: FrameType | None) -> None:
+        global _shutdown_requested
+        _shutdown_requested = True
+
+    signal.signal(signal.SIGINT, _handler)
+
+
+def _run_watch(args: argparse.Namespace) -> int:
+    global _shutdown_requested
+    _shutdown_requested = False
+    try:
+        resolved = load_config(config_path=args.config)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
+        return 2 if err.level is ErrorLevel.CRITICAL else 1
+
+    cfg = resolved.values
+    watch_cfg = cfg["watch"]
+    try:
+        source = PollingSource(
+            Path(watch_cfg["root"]),
+            interval=float(watch_cfg["poll_interval"]),
+            max_files=int(watch_cfg["max_files"]),
+            large_file_warn_bytes=int(watch_cfg["large_file_warn_bytes"]),
+        )
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: watcher.path_scope_violation: {exc}\n")
+        return 2
+
+    aggregator = SessionAggregator(
+        source,
+        config=cfg,
+        project_registry=ProjectRegistry(),
+        clock=time.monotonic,
+    )
+
+    show_badge = _any_experimental_enabled(cfg)
+    renderer = TerminalRenderer(show_experimental_badge=show_badge)
+    explain = bool(args.explain)
+
+    _install_sigint_handler()
+    tick_interval = float(watch_cfg["tick_interval"])
+
+    try:
+        while True:
+            try:
+                pairs = list(aggregator.tick())
+            except CodevigilError as err:
+                renderer.render_error(err, None)
+                pairs = []
+            renderer.begin_tick()
+            for meta, snapshots in pairs:
+                adjusted = _apply_explain_to_snapshots(snapshots, explain=explain)
+                renderer.render(adjusted, meta)
+            renderer.end_tick()
+            if _shutdown_requested:
+                break
+            time.sleep(tick_interval)
+            if _shutdown_requested:
+                break
+    finally:
+        aggregator.close()
+        renderer.close()
+        sys.stdout.write("\ncodevigil shutdown\n")
+        sys.stdout.flush()
+    return 0
+
+
+def _any_experimental_enabled(cfg: dict[str, Any]) -> bool:
+    """Return True if any enabled collector has ``experimental = True``."""
+
+    collectors = cfg.get("collectors", {})
+    enabled = collectors.get("enabled", [])
+    for name in enabled:
+        section = collectors.get(name)
+        if isinstance(section, dict) and section.get("experimental") is True:
+            return True
+    return False
+
+
+def _apply_explain_to_snapshots(
+    snapshots: list[MetricSnapshot],
+    *,
+    explain: bool,
+) -> list[MetricSnapshot]:
+    """Append stop_phrase intent annotations to the label when ``--explain``.
+
+    Other collectors pass through unchanged. The renderer's label slot is
+    the only surface that reaches the terminal body, and the design
+    calls for intent to appear alongside the matched phrase, so we
+    thread it in here rather than teaching the renderer a new hook.
+    """
+
+    if not explain:
+        return snapshots
+    out: list[MetricSnapshot] = []
+    for snap in snapshots:
+        annotation = _intent_annotation(snap)
+        if annotation is None:
+            out.append(snap)
+            continue
+        label = f"{snap.label} | intent: {annotation}" if snap.label else f"intent: {annotation}"
+        out.append(
+            MetricSnapshot(
+                name=snap.name,
+                value=snap.value,
+                label=label,
+                severity=snap.severity,
+                detail=snap.detail,
+            )
+        )
+    return out
+
+
+def _intent_annotation(snap: MetricSnapshot) -> str | None:
+    """Pull the most recent ``intent`` from a stop_phrase snapshot, if any."""
+
+    if snap.name != "stop_phrase":
+        return None
+    detail = snap.detail
+    if not isinstance(detail, dict):
+        return None
+    recent = detail.get("recent_hits")
+    if not isinstance(recent, list) or not recent:
+        return None
+    last = recent[-1]
+    if not isinstance(last, dict):
+        return None
+    intent = last.get("intent")
+    if isinstance(intent, str) and intent:
+        return intent
+    return None
+
+
+# ---------------------------------------------------------------------------
+# report
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True, slots=True)
+class _SessionReport:
+    """One session's rolled-up report derived from a fully-parsed file."""
+
+    session_id: str
+    file_path: Path
+    first_event_time: datetime | None
+    last_event_time: datetime | None
+    event_count: int
+    parse_confidence: float
+    metrics: list[MetricSnapshot]
+
+
+def _run_report(args: argparse.Namespace) -> int:
+    try:
+        resolved = load_config(config_path=args.config)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
+        return 2 if err.level is ErrorLevel.CRITICAL else 1
+
+    cfg = resolved.values
+    from_dt = _parse_date_filter(args.from_date, end_of_day=False)
+    to_dt = _parse_date_filter(args.to_date, end_of_day=True)
+    if from_dt is None and args.from_date is not None:
+        sys.stderr.write(f"CRITICAL: cli.report.bad_date: --from {args.from_date!r}\n")
+        return 2
+    if to_dt is None and args.to_date is not None:
+        sys.stderr.write(f"CRITICAL: cli.report.bad_date: --to {args.to_date!r}\n")
+        return 2
+
+    try:
+        output_dir = _resolve_report_output_dir(cfg, override=args.output)
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
+        return 2
+
+    files = list(_expand_path_argument(args.path))
+    files = _filter_by_date(files, from_dt=from_dt, to_dt=to_dt)
+    files.sort(key=lambda p: str(p))
+
+    reports: list[_SessionReport] = []
+    exit_code = 0
+    for path in files:
+        report = _build_session_report(path, cfg)
+        reports.append(report)
+        if report.parse_confidence < 0.9:
+            exit_code = 2
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    explain = bool(args.explain)
+    if args.format == "json":
+        payload = _render_report_json(reports, explain=explain)
+        _write_report(output_dir / "report.json", payload)
+        sys.stdout.write(payload)
+    else:
+        payload = _render_report_markdown(reports, explain=explain)
+        _write_report(output_dir / "report.md", payload)
+        sys.stdout.write(payload)
+    sys.stdout.flush()
+    return exit_code
+
+
+def _parse_date_filter(value: str | None, *, end_of_day: bool) -> datetime | None:
+    if value is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError:
+        return None
+    if end_of_day and parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
+        return parsed.replace(hour=23, minute=59, second=59)
+    return parsed
+
+
+def _resolve_report_output_dir(cfg: dict[str, Any], *, override: Path | None) -> Path:
+    """Resolve the report output directory and enforce the home-scope rule.
+
+    The config default is ``~/.local/share/codevigil/reports``. Users may
+    override via ``report.output_dir`` in the TOML file or via the
+    ``--output`` CLI flag; the resolved absolute path must be a descendant
+    of ``Path.home().resolve()`` or the command aborts with
+    ``PrivacyViolationError``. This mirrors the watcher's filesystem scope
+    gate so there is exactly one privacy rule across read and write paths.
+    """
+
+    if override is not None:
+        candidate = override
+    else:
+        raw = cfg.get("report", {}).get("output_dir", CONFIG_DEFAULTS["report"]["output_dir"])
+        candidate = Path(str(raw))
+    resolved = candidate.expanduser().resolve()
+    home = Path.home().resolve()
+    if not resolved.is_relative_to(home):
+        raise PrivacyViolationError(
+            f"report output directory {str(resolved)!r} is outside the user "
+            f"home directory {str(home)!r}; refusing to write"
+        )
+    return resolved
+
+
+def _expand_path_argument(raw: str) -> Iterator[Path]:
+    """Resolve ``raw`` to one or more ``*.jsonl`` files.
+
+    Accepts a file, a directory (walked recursively), or a shell-style
+    glob (``*``/``?`` character present). File existence is verified here
+    so a typo gets a loud message instead of an empty report.
+    """
+
+    if any(ch in raw for ch in "*?["):
+        base = Path(raw).expanduser()
+        parent = base.parent if str(base.parent) else Path(".")
+        pattern = base.name
+        yield from sorted(p for p in parent.glob(pattern) if p.is_file())
+        return
+    path = Path(raw).expanduser()
+    if path.is_file():
+        yield path
+        return
+    if path.is_dir():
+        yield from sorted(p for p in path.rglob("*.jsonl") if p.is_file())
+        return
+    # Non-existent path: yield nothing. Callers render an empty report.
+
+
+def _filter_by_date(
+    paths: Iterable[Path],
+    *,
+    from_dt: datetime | None,
+    to_dt: datetime | None,
+) -> list[Path]:
+    if from_dt is None and to_dt is None:
+        return list(paths)
+    kept: list[Path] = []
+    for path in paths:
+        first = _peek_first_event_timestamp(path)
+        if first is None:
+            kept.append(path)
+            continue
+        if from_dt is not None and first.replace(tzinfo=None) < from_dt.replace(tzinfo=None):
+            continue
+        if to_dt is not None and first.replace(tzinfo=None) > to_dt.replace(tzinfo=None):
+            continue
+        kept.append(path)
+    return kept
+
+
+def _peek_first_event_timestamp(path: Path) -> datetime | None:
+    """Read the first non-blank line of ``path`` and extract ``timestamp``."""
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                try:
+                    parsed = json.loads(stripped)
+                except json.JSONDecodeError:
+                    return None
+                raw = parsed.get("timestamp") if isinstance(parsed, dict) else None
+                if not isinstance(raw, str) or not raw:
+                    return None
+                try:
+                    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                except ValueError:
+                    return None
+    except OSError:
+        return None
+    return None
+
+
+def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
+    """Parse ``path`` end-to-end and run every enabled collector offline.
+
+    One-shot replay of the per-session ingest path: every event feeds
+    through the same collector instances the aggregator would have built
+    at tick time, then snapshot once at the end. No source, no tick loop,
+    no lifecycle — just parser plus collectors.
+    """
+
+    from codevigil.collectors import COLLECTORS  # local to avoid CLI/boot cycle
+
+    session_id = path.stem
+    parser = SessionParser(session_id=session_id)
+    collector_instances: dict[str, Any] = {}
+
+    names: list[str] = ["parse_health"] if "parse_health" in COLLECTORS else []
+    for name in cfg.get("collectors", {}).get("enabled", []):
+        if name == "parse_health":
+            continue
+        if name in COLLECTORS:
+            names.append(name)
+    for name in names:
+        instance = COLLECTORS[name]()
+        bind = getattr(instance, "bind_stats", None)
+        if callable(bind):
+            bind(parser.stats)
+        collector_instances[name] = instance
+
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+    event_count = 0
+
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for event in parser.parse(handle):
+                event_count += 1
+                if first_ts is None:
+                    first_ts = event.timestamp
+                last_ts = event.timestamp
+                for collector in collector_instances.values():
+                    try:
+                        collector.ingest(event)
+                    except CodevigilError:
+                        # Non-swallowing rule: peers continue, per-file
+                        # degradation surfaces via parse_health.
+                        continue
+    except OSError:
+        pass
+
+    metrics: list[MetricSnapshot] = []
+    for collector in collector_instances.values():
+        try:
+            metrics.append(collector.snapshot())
+        except CodevigilError:
+            continue
+
+    return _SessionReport(
+        session_id=session_id,
+        file_path=path,
+        first_event_time=first_ts,
+        last_event_time=last_ts,
+        event_count=event_count,
+        parse_confidence=float(parser.stats.parse_confidence),
+        metrics=metrics,
+    )
+
+
+def _render_report_json(reports: list[_SessionReport], *, explain: bool) -> str:
+    out_lines: list[str] = []
+    for report in sorted(reports, key=lambda r: r.session_id):
+        record: dict[str, Any] = {
+            "kind": "session_report",
+            "session_id": report.session_id,
+            "file_path": str(report.file_path),
+            "first_event_time": (
+                report.first_event_time.isoformat() if report.first_event_time else None
+            ),
+            "last_event_time": (
+                report.last_event_time.isoformat() if report.last_event_time else None
+            ),
+            "event_count": report.event_count,
+            "parse_confidence": report.parse_confidence,
+            "metrics": [
+                _metric_to_dict(m, explain=explain)
+                for m in sorted(report.metrics, key=lambda m: m.name)
+            ],
+        }
+        out_lines.append(json.dumps(record, sort_keys=True, separators=(",", ":")))
+    return "\n".join(out_lines) + ("\n" if out_lines else "")
+
+
+def _render_report_markdown(reports: list[_SessionReport], *, explain: bool) -> str:
+    """Render a deterministic markdown summary.
+
+    Output is stable under identical input: sessions are sorted by id,
+    metric rows by name, and no wall-clock timestamps are embedded. This
+    is what makes the golden-output test in ``tests/cli`` possible.
+    """
+
+    lines: list[str] = ["# codevigil report", ""]
+    for report in sorted(reports, key=lambda r: r.session_id):
+        lines.append(f"## session `{report.session_id}`")
+        lines.append("")
+        lines.append(f"- file: `{report.file_path}`")
+        lines.append(f"- events: {report.event_count}")
+        lines.append(f"- parse_confidence: {report.parse_confidence:.2f}")
+        lines.append("")
+        lines.append("| metric | value | severity | label |")
+        lines.append("| --- | --- | --- | --- |")
+        for metric in sorted(report.metrics, key=lambda m: m.name):
+            label = metric.label
+            if explain:
+                annotation = _intent_annotation(metric)
+                if annotation is not None:
+                    label = f"{label} | intent: {annotation}" if label else f"intent: {annotation}"
+            lines.append(
+                f"| {metric.name} | {metric.value:.2f} | "
+                f"{_severity_word(metric.severity)} | {label} |"
+            )
+        lines.append("")
+    return "\n".join(lines)
+
+
+def _severity_word(severity: Severity) -> str:
+    return {
+        Severity.OK: "OK",
+        Severity.WARN: "WARN",
+        Severity.CRITICAL: "CRIT",
+    }[severity]
+
+
+def _metric_to_dict(metric: MetricSnapshot, *, explain: bool) -> dict[str, Any]:
+    detail = metric.detail
+    if not explain and isinstance(detail, dict) and "recent_hits" in detail:
+        stripped_recent = [
+            {k: v for k, v in hit.items() if k != "intent"}
+            for hit in detail["recent_hits"]
+            if isinstance(hit, dict)
+        ]
+        detail = {**detail, "recent_hits": stripped_recent}
+    return {
+        "name": metric.name,
+        "value": metric.value,
+        "label": metric.label,
+        "severity": metric.severity.value,
+        "detail": detail,
+    }
+
+
+def _write_report(path: Path, payload: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(payload)
+
+
+# ---------------------------------------------------------------------------
+# export
+# ---------------------------------------------------------------------------
+
+
+def _run_export(args: argparse.Namespace) -> int:
+    """Dump events as NDJSON on stdout.
+
+    Event serialization shape (one JSON object per line)::
+
+        {"timestamp": "<iso>", "session_id": "<id>", "kind": "<kind>",
+         "payload": {...}}
+
+    Deliberately *different* from ``JsonFileRenderer``: that renderer
+    writes one snapshot row per tick per session with metric values,
+    whereas ``export`` reproduces the parsed event stream so callers can
+    pipe it into ``jq`` and compute their own aggregates.
+    """
+
+    explain = bool(args.explain)
+    for path in _expand_path_argument(args.path):
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                for event in parse_session(handle, session_id=path.stem):
+                    sys.stdout.write(_event_to_ndjson_line(event, explain=explain))
+                    sys.stdout.write("\n")
+        except OSError:
+            continue
+    sys.stdout.flush()
+    return 0
+
+
+def _event_to_ndjson_line(event: Event, *, explain: bool) -> str:
+    payload = dict(event.payload)
+    if not explain and "intent" in payload:
+        payload.pop("intent", None)
+    record = {
+        "timestamp": event.timestamp.isoformat(),
+        "session_id": event.session_id,
+        "kind": event.kind.value,
+        "payload": payload,
+    }
+    return json.dumps(record, sort_keys=True, separators=(",", ":"))
 
 
 __all__ = ["main"]
