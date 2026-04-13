@@ -1,165 +1,125 @@
-# codevigil
+# codevigil - Session Quality, Observed
 
 Local, privacy-preserving observability for Claude Code sessions.
 
-codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics
-about reasoning and tool-use patterns, and surfaces them in a terminal dashboard
-or as JSON/markdown reports. Stdlib-only runtime, zero network egress, no data
-ever leaves your machine.
+codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics about reasoning and tool-use patterns, and surfaces them in a terminal dashboard or as JSON / markdown reports. **Stdlib-only runtime, zero network egress, no data ever leaves your machine.**
 
-Status: alpha (Development Status :: 3). Python 3.11 and 3.12.
+Status: alpha. Python 3.11 and 3.12.
 
-## Quickstart
+## Install
 
-Install from a local checkout with `uv`:
-
-```
-uv tool install --from . codevigil
+```bash
+uv tool install codevigil
 ```
 
-Or from PyPI once published:
+That's it. `uv tool install` puts a `codevigil` executable on your `PATH` in an isolated environment so it does not interfere with your project virtualenvs. To upgrade later, run `uv tool upgrade codevigil`. To remove it, `uv tool uninstall codevigil`.
 
-```
-pip install codevigil
-```
+If you don't have `uv`, install it from <https://docs.astral.sh/uv/getting-started/installation/>, or fall back to `pipx install codevigil` / `pip install --user codevigil`. See [docs/installation.md](docs/installation.md) for every supported path including from-source installs.
 
-Then:
+## First run
 
-```
-codevigil config check            # show the resolved config and its sources
-codevigil watch                   # live terminal dashboard
-codevigil report ~/.claude/projects --format markdown
-codevigil export session.jsonl    # NDJSON on stdout for piping to jq
+```bash
+codevigil watch
 ```
 
-## CLI reference
+Tails every active session under `~/.claude/projects` and prints a live multi-session dashboard at one frame per second. Each session shows three metrics — read/edit ratio, stop-phrase hit count, reasoning loop rate — plus a header line with parse confidence and an `[experimental thresholds]` badge while you're still inside the bootstrap window.
 
-Global flags apply to every subcommand:
+```text
+codevigil [experimental thresholds] | parse_confidence: 1.00
+session: a3f7c2d | project: my-project | 2m 34s ACTIVE
+──────────────────────────────────────────────────────────────
+  read_edit_ratio    5.2  OK    [R:E 5.2 | research:mut 7.1]
+  stop_phrase        0    OK    [0 hits]
+  reasoning_loop     6.4  OK    [6.4/1K tool calls | burst: 2]
+──────────────────────────────────────────────────────────────
+```
 
-| flag | description |
-| --- | --- |
-| `--config PATH` | Path to a TOML config file. Overrides `~/.config/codevigil/config.toml`. |
-| `--explain` | Surface `stop_phrase` intent annotations in watch/report/export output. |
-| `--version` | Print `codevigil <version>` and exit. |
+`Ctrl-C` exits cleanly. Walk through what every column means and how to interpret it in [docs/getting-started.md](docs/getting-started.md).
 
-### `codevigil config check`
+## What else can it do
 
-Resolve the effective config and print each value with its source (default,
-file, env, or CLI). Exit code is `0` on success, `2` on a critical config
-error.
+```bash
+codevigil config check               # show the resolved config and where each value came from
+codevigil report ~/.claude/projects  # batch report over a tree of session files
+codevigil report sessions/ --format markdown --from 2026-04-01
+codevigil export session.jsonl       # NDJSON event stream on stdout, jq-friendly
+codevigil export session.jsonl | jq 'select(.kind == "tool_call") | .payload.tool_name'
+```
 
-### `codevigil watch`
-
-Live tick loop over `~/.claude/projects` session files. Polls at the
-configured interval, parses new events, runs every enabled collector, and
-renders a terminal frame per tick. `Ctrl-C` triggers a clean shutdown.
-
-When any enabled collector is still marked `experimental = true`, the header
-shows `[experimental thresholds]` until bootstrap completes or the user sets
-`experimental = false` in config.
-
-### `codevigil report PATH`
-
-Batch analysis over one or more session files.
-
-| flag | description |
-| --- | --- |
-| `PATH` | File, directory (walked recursively for `*.jsonl`), or shell glob. |
-| `--from YYYY-MM-DD` | Filter sessions whose first event is on/after this date. |
-| `--to YYYY-MM-DD` | Filter sessions whose first event is on/before this date. |
-| `--format {json,markdown}` | Output format (default: `json`). |
-| `--output DIR` | Override report output directory. Must live under `$HOME`. |
-
-Output is deterministic under identical input: sessions sort by id, metric
-rows sort by name, no wall-clock timestamps are embedded. Reports are written
-to `~/.local/share/codevigil/reports/` by default. Exit code is `2` if any
-session's parse confidence drops below `0.9`.
-
-### `codevigil export PATH`
-
-Stream parsed events as NDJSON on stdout. Each line is one event with
-`timestamp`, `session_id`, `kind`, and `payload`. Pipe into `jq` to compute
-ad-hoc aggregates. Without `--explain`, `intent` fields are stripped from the
-payload for symmetry with the non-explain watch output.
+Full flag reference for every subcommand: [docs/cli.md](docs/cli.md).
 
 ## Configuration
 
-Config is resolved in this precedence order (highest first):
+codevigil resolves its configuration from a layered precedence chain: built-in defaults → `~/.config/codevigil/config.toml` → `CODEVIGIL_*` environment variables → CLI flags. Run `codevigil config check` to see every resolved key with its source.
 
-1. CLI flags
-2. Environment variables (`CODEVIGIL_*`)
-3. Config file (`~/.config/codevigil/config.toml` or `--config PATH`)
-4. Built-in defaults
+A minimal `~/.config/codevigil/config.toml`:
 
-Environment overrides:
+```toml
+[watch]
+poll_interval = 1.0
 
-| env var | maps to |
-| --- | --- |
-| `CODEVIGIL_LOG_PATH` | `logging.log_path` |
-| `CODEVIGIL_WATCH_ROOT` | `watch.root` |
-| `CODEVIGIL_WATCH_POLL_INTERVAL` | `watch.poll_interval` |
-| `CODEVIGIL_WATCH_TICK_INTERVAL` | `watch.tick_interval` |
-| `CODEVIGIL_REPORT_OUTPUT_DIR` | `report.output_dir` |
-| `CODEVIGIL_REPORT_OUTPUT_FORMAT` | `report.output_format` |
-| `CODEVIGIL_BOOTSTRAP_SESSIONS` | `bootstrap.sessions` |
+[collectors.read_edit_ratio]
+warn_threshold = 5.0
+critical_threshold = 2.5
+```
 
-Run `codevigil config check` to see every resolved key with its source.
+The complete key reference, env-var bindings, and validation rules live in [docs/configuration.md](docs/configuration.md).
 
-## Privacy guarantees
+## What gets measured
 
-- Zero network egress. A runtime import allowlist hook installed at package
-  init raises `PrivacyViolationError` if any codevigil module imports
-  `socket`, `urllib`, `http.client`, `httpx`, `requests`, `aiohttp`,
-  `ftplib`, `smtplib`, `ssl`, `subprocess`, or related transports.
-- A CI grep gate (`scripts/ci_privacy_grep.sh`) re-checks the tree for the
-  same banned names as a belt-and-suspenders second layer.
-- The watcher and the report writer both refuse any path outside `$HOME` via
-  a `Path.resolve().is_relative_to(home)` check on every read and write.
+Three user-facing collectors plus an always-on integrity gate:
 
-No data ever leaves your machine.
+| Collector         | Signal                                                                                                         |
+| ----------------- | -------------------------------------------------------------------------------------------------------------- |
+| `read_edit_ratio` | Reads vs. mutations, blind-edit detection, file-tracking confidence                                            |
+| `stop_phrase`     | Hits against ownership-dodging, permission-seeking, premature-stopping, and known-limitation phrase categories |
+| `reasoning_loop`  | Self-correction phrase rate per 1K tool calls plus longest consecutive burst                                   |
+| `parse_health`    | Always-on. Flips to CRITICAL when parse confidence drops below 0.9 in any 50-line window                       |
+
+Threshold semantics, what each metric is sensitive to, and how to interpret CRITICAL signals: [docs/collectors.md](docs/collectors.md).
+
+## Privacy
+
+Three independent enforcement layers ensure session data never leaves your machine:
+
+- **Runtime import allowlist hook** installed at package init refuses any import of `socket`, `urllib`, `http.client`, `httpx`, `requests`, `aiohttp`, `ftplib`, `smtplib`, `ssl`, `subprocess`, or related transports from inside a `codevigil` module.
+- **CI grep gate** re-checks the source tree for the same banned names on every push as a belt-and-suspenders second layer.
+- **Filesystem scope check** refuses any read or write path outside `$HOME` via a `Path.resolve().is_relative_to(home)` check.
+
+The full privacy model and threat boundary: [docs/privacy.md](docs/privacy.md).
+
+## Documentation
+
+| Doc                                                | What it covers                                      |
+| -------------------------------------------------- | --------------------------------------------------- |
+| [docs/installation.md](docs/installation.md)       | Install, upgrade, uninstall, from-source builds     |
+| [docs/getting-started.md](docs/getting-started.md) | First-run walkthrough and interpreting the output   |
+| [docs/cli.md](docs/cli.md)                         | Exhaustive CLI reference: every subcommand and flag |
+| [docs/configuration.md](docs/configuration.md)     | Every config key, env binding, and validation rule  |
+| [docs/collectors.md](docs/collectors.md)           | What each metric measures and how to interpret it   |
+| [docs/privacy.md](docs/privacy.md)                 | Privacy guarantees and the threat model             |
+| [docs/design.md](docs/design.md)                   | Architecture, plugin boundaries, error taxonomy     |
+| [CHANGELOG.md](CHANGELOG.md)                       | Release notes                                       |
 
 ## Experimental thresholds
 
-Default collector thresholds in v0.1 are derived from a single user's post-hoc
-session window. One user's sample is not a population baseline, so every
-default is marked `experimental = true` and the watch header displays an
-`[experimental thresholds]` badge until you either run bootstrap mode or set
-`experimental = false` in config.
+The default v0.1 thresholds were derived from a single user's session window — one user is not a population baseline. Every default ships with `experimental = true` and the watch header shows `[experimental thresholds]` until you either flip the flag in config or let bootstrap mode personalise the thresholds for your own workflow.
 
-Bootstrap mode observes the first N sessions (default `bootstrap.sessions =
-10`) with severity pinned to `OK`, records per-collector value distributions,
-then shifts defaults to local-percentile thresholds (WARN at p80, CRITICAL at
-p95) clamped by the literal-value hard caps. This personalises signal to your
-actual workflow without manual tuning.
+Bootstrap mode observes the first 10 sessions (configurable) with all severities pinned to `OK`, records the per-collector value distributions, then derives WARN at p80 and CRITICAL at p95 of _your_ local data, clamped by the literal-value hard caps. No manual tuning required. See [docs/collectors.md#experimental-thresholds-and-bootstrap](docs/collectors.md#experimental-thresholds-and-bootstrap).
 
-## Complexity ceiling
+## Contributing
 
-Collectors have honest per-ingest cost:
-
-- `read_edit_ratio` is O(1): deque append plus counter update.
-- `stop_phrase` and `reasoning_loop` are O(P·L) with P = phrase count and
-  L = message length. Both escalate to an Aho–Corasick automaton once P > 32
-  to bound cost to O(L + matches).
-- `blind_edit_rate` is O(W) with W = lookback window size (default 20).
-
-At P=50 and L=2000 the naive scan is roughly 5M character compares per
-session of 50 assistant messages — well under a second on any modern laptop,
-but not O(1). The Aho–Corasick escalation is the upgrade path if user phrase
-lists grow large.
-
-## Development
-
-```
+```bash
+git clone https://github.com/Mathews-Tom/codevigil
+cd codevigil
 uv sync --dev
-uv run ruff check .
-uv run ruff format --check .
-uv run mypy --strict codevigil
 uv run pytest
+uv run mypy --strict codevigil
+uv run ruff check .
 bash scripts/ci_privacy_grep.sh
 ```
 
-All five gates must pass before a commit lands. The privacy grep runs
-separately in CI as a second layer against the runtime import allowlist.
+All five gates must pass before a commit lands. The privacy grep runs as a separate CI job alongside the typecheck-and-test matrix on every PR.
 
 ## License
 
