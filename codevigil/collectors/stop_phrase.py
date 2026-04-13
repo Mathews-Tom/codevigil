@@ -122,6 +122,7 @@ DEFAULT_PHRASES: tuple[PhraseSpec, ...] = (
 )
 
 _RECENT_HITS_CAP: int = 5
+_CONTEXT_WINDOW: int = 40  # characters on each side of the matched span
 
 
 def _record_skipped_phrase(message: str, context: dict[str, Any]) -> None:
@@ -245,11 +246,19 @@ class StopPhraseCollector:
             self._hits_by_category[hit.spec.category] = (
                 self._hits_by_category.get(hit.spec.category, 0) + 1
             )
+            # Extract a 40-char window centred on the match, trimming at
+            # string boundaries. ctx_start..ctx_end is at most
+            # _CONTEXT_WINDOW chars before the match and _CONTEXT_WINDOW
+            # chars after it, capped by len(text).
+            ctx_start = max(0, hit.start - _CONTEXT_WINDOW)
+            ctx_end = min(len(text), hit.end + _CONTEXT_WINDOW)
+            context_snippet = text[ctx_start:ctx_end]
             self._recent_hits.append(
                 {
                     "category": hit.spec.category,
                     "phrase": hit.spec.text,
                     "matched_substring": hit.matched,
+                    "context_snippet": context_snippet,
                     "intent": hit.spec.intent,
                     "message_index": message_index,
                 }

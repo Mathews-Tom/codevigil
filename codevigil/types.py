@@ -72,7 +72,14 @@ class SessionState(Enum):
 
 @dataclass(frozen=True, slots=True)
 class SessionMeta:
-    """Aggregator-owned view of a session handed to renderers on every tick."""
+    """Aggregator-owned view of a session handed to renderers on every tick.
+
+    ``snapshot_history`` carries the last-three per-metric scalar values for
+    the mini-trend display in the watch-mode renderer. Keys are collector
+    names; values are tuples of up to three floats in chronological order
+    (oldest first). The field defaults to an empty dict so existing callers
+    and tests that construct ``SessionMeta`` without it continue to work.
+    """
 
     session_id: str
     project_hash: str
@@ -83,6 +90,7 @@ class SessionMeta:
     event_count: int
     parse_confidence: float
     state: SessionState
+    snapshot_history: dict[str, tuple[float, ...]] = field(default_factory=dict)
 
 
 @runtime_checkable
