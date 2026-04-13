@@ -92,6 +92,7 @@ class FileCursor:
     size: int
     offset: int
     pending: bytes = b""
+    large_file_warned: bool = False
 
 
 @runtime_checkable
@@ -109,6 +110,13 @@ class Source(Protocol):
     def close(self) -> None: ...
 
 
+@dataclass(slots=True)
+class _WalkResult:
+    files: list[Path]
+    overflowed: bool
+    overflow_count: int
+
+
 def _now() -> datetime:
     return datetime.now(tz=UTC)
 
@@ -117,9 +125,16 @@ class PollingSource:
     """Stat-and-read polling implementation of the ``Source`` protocol.
 
     Holds a per-file ``FileCursor`` table in memory; on every ``poll()``
-    call walks the configured ``root``, stats each discovered ``*.jsonl``
-    file, and yields ``SourceEvent`` records for the transitions documented
-    in the module docstring.
+    call walks the configured ``root`` (capped at ``max_files``), stats each
+    discovered ``*.jsonl`` file, and yields ``SourceEvent`` records for the
+    transitions documented in the module docstring.
+
+    Constructor requires ``root`` to resolve to a path inside the user's
+    home directory; any path outside ``$HOME`` raises ``PrivacyViolationError``
+    before the source is usable. This is the runtime half of the filesystem
+    scope rule (``docs/design.md`` §Privacy Enforcement); a CRITICAL error
+    is also recorded on the error channel so operators see the attempt in
+    the JSONL log.
     """
 
     def __init__(
@@ -127,23 +142,33 @@ class PollingSource:
         root: Path,
         *,
         interval: float = 2.0,
+        max_files: int = 2000,
+        large_file_warn_bytes: int = 10 * 1024 * 1024,
     ) -> None:
         self._interval: float = interval
+        self._max_files: int = max_files
+        self._large_file_warn_bytes: int = large_file_warn_bytes
         self._cursors: dict[Path, FileCursor] = {}
+        self._overflow_warned: bool = False
         self._root: Path = self._validate_root(root)
+
+    @property
+    def root(self) -> Path:
+        return self._root
+
+    @property
+    def interval(self) -> float:
+        return self._interval
+
+    @property
+    def max_files(self) -> int:
+        return self._max_files
 
     # ------------------------------------------------------------------ scope
 
     @staticmethod
     def _validate_root(root: Path) -> Path:
-        """Resolve the root once and refuse anything outside ``$HOME``.
-
-        Runtime half of the filesystem-scope rule from
-        ``docs/design.md`` §Privacy Enforcement. A CRITICAL error is recorded
-        on the error channel before ``PrivacyViolationError`` is raised so
-        operators see the attempt in the JSONL log even though the constructor
-        also propagates the exception to the caller.
-        """
+        """Resolve the root once and refuse anything outside ``$HOME``."""
 
         resolved_root = root.expanduser().resolve()
         home = Path.home().resolve()
@@ -165,27 +190,19 @@ class PollingSource:
             raise PrivacyViolationError(err.message)
         return resolved_root
 
-    @property
-    def root(self) -> Path:
-        return self._root
-
-    @property
-    def interval(self) -> float:
-        return self._interval
-
     # ------------------------------------------------------------------- walk
 
-    def _walk(self) -> list[Path]:
-        """Return the deterministic list of session files under root.
+    def _walk(self) -> _WalkResult:
+        """Return the deterministic, capped list of session files under root.
 
         Walks the tree with ``os.scandir`` and collects every regular file
         ending in ``.jsonl``. Results are sorted by absolute path so the
-        traversal order is stable across polls and platforms.
+        "first ``max_files``" slice is stable across polls and platforms.
         """
 
         discovered: list[Path] = []
         if not self._root.exists():
-            return discovered
+            return _WalkResult(files=[], overflowed=False, overflow_count=0)
 
         stack: list[Path] = [self._root]
         while stack:
@@ -205,7 +222,13 @@ class PollingSource:
                     continue
 
         discovered.sort(key=lambda p: str(p))
-        return discovered
+        if len(discovered) > self._max_files:
+            return _WalkResult(
+                files=discovered[: self._max_files],
+                overflowed=True,
+                overflow_count=len(discovered) - self._max_files,
+            )
+        return _WalkResult(files=discovered, overflowed=False, overflow_count=0)
 
     # ------------------------------------------------------------------- poll
 
@@ -218,14 +241,34 @@ class PollingSource:
         """
 
         events: list[SourceEvent] = []
-        files = self._walk()
+        walk = self._walk()
+        if walk.overflowed and not self._overflow_warned:
+            self._overflow_warned = True
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.WATCHER,
+                    code="watcher.bounded_walk_overflow",
+                    message=(
+                        f"watcher walk exceeded max_files={self._max_files}; "
+                        f"{walk.overflow_count} file(s) skipped"
+                    ),
+                    context={
+                        "max_files": self._max_files,
+                        "overflow_count": walk.overflow_count,
+                        "root": str(self._root),
+                    },
+                )
+            )
 
         seen_paths: set[Path] = set()
-        for path in files:
+        for path in walk.files:
             seen_paths.add(path)
             try:
                 st = os.stat(path)
             except FileNotFoundError:
+                # File vanished between scandir and stat; treat as delete on
+                # the next pass once the cursor sees it missing.
                 continue
             if not stat.S_ISREG(st.st_mode):
                 continue
@@ -296,6 +339,8 @@ class PollingSource:
             self._handle_new(path, inode, size, events, emit_new_session=False)
             return
         if size > cursor.size:
+            growth = size - cursor.offset
+            self._maybe_warn_large_growth(path, cursor, growth)
             self._read_and_emit(path, cursor, size, events)
 
     def _handle_new(
@@ -321,7 +366,34 @@ class PollingSource:
                 )
             )
         if size > 0:
+            self._maybe_warn_large_growth(path, cursor, size)
             self._read_and_emit(path, cursor, size, events)
+
+    def _maybe_warn_large_growth(
+        self,
+        path: Path,
+        cursor: FileCursor,
+        growth: int,
+    ) -> None:
+        if growth <= self._large_file_warn_bytes or cursor.large_file_warned:
+            return
+        cursor.large_file_warned = True
+        record(
+            CodevigilError(
+                level=ErrorLevel.WARN,
+                source=ErrorSource.WATCHER,
+                code="watcher.large_file_growth",
+                message=(
+                    f"file {str(path)!r} grew {growth} bytes in a single poll "
+                    f"(threshold {self._large_file_warn_bytes}); processing anyway"
+                ),
+                context={
+                    "path": str(path),
+                    "growth": growth,
+                    "threshold": self._large_file_warn_bytes,
+                },
+            )
+        )
 
     def _read_and_emit(
         self,
