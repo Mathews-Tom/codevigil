@@ -29,13 +29,14 @@ import sys
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from types import FrameType
 from typing import Any
 
 from codevigil import __version__
 from codevigil.aggregator import SessionAggregator
+from codevigil.analysis.cohort import VALID_DIMENSIONS
 from codevigil.bootstrap import BootstrapManager
 from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
 from codevigil.errors import CodevigilError, ErrorLevel
@@ -110,7 +111,33 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output",
         type=Path,
         default=None,
-        help="Override report output directory (must live under $HOME).",
+        help="Override the report output directory (must live under $HOME).",
+    )
+    report_parser.add_argument(
+        "--group-by",
+        dest="group_by",
+        choices=("day", "week", "project", "model", "permission_mode"),
+        default=None,
+        help=(
+            "Produce a cohort trend table grouped by this dimension. "
+            "Rows are dimension values, columns are metrics, "
+            "cells show mean ± stdev (n). Cells with n<5 are redacted. "
+            "Incompatible with --compare-periods."
+        ),
+    )
+    report_parser.add_argument(
+        "--compare-periods",
+        dest="compare_periods",
+        type=str,
+        default=None,
+        metavar="A_START:A_END,B_START:B_END",
+        help=(
+            "Compare two date ranges in YYYY-MM-DD:YYYY-MM-DD format, "
+            "separated by a comma. Example: "
+            "2026-03-01:2026-03-15,2026-04-01:2026-04-15. "
+            "Produces a signed delta table and a prose summary per metric. "
+            "Incompatible with --group-by."
+        ),
     )
 
     export_parser = sub.add_parser(
@@ -379,6 +406,23 @@ def _run_report(args: argparse.Namespace) -> int:
         return 2 if err.level is ErrorLevel.CRITICAL else 1
 
     cfg = resolved.values
+
+    # Mutual exclusivity check for the two new flags.
+    group_by: str | None = getattr(args, "group_by", None)
+    compare_periods_arg: str | None = getattr(args, "compare_periods", None)
+    if group_by is not None and compare_periods_arg is not None:
+        sys.stderr.write(
+            "CRITICAL: cli.report.flag_conflict: "
+            "--group-by and --compare-periods are mutually exclusive\n"
+        )
+        return 2
+
+    if group_by is not None:
+        return _run_report_group_by(args, cfg=cfg, dimension=group_by)
+    if compare_periods_arg is not None:
+        return _run_report_compare_periods(args, cfg=cfg, raw_periods=compare_periods_arg)
+
+    # Original per-session report path (unchanged).
     from_dt = _parse_date_filter(args.from_date, end_of_day=False)
     to_dt = _parse_date_filter(args.to_date, end_of_day=True)
     if from_dt is None and args.from_date is not None:
@@ -398,26 +442,155 @@ def _run_report(args: argparse.Namespace) -> int:
     files = _filter_by_date(files, from_dt=from_dt, to_dt=to_dt)
     files.sort(key=lambda p: str(p))
 
-    reports: list[_SessionReport] = []
+    session_reports: list[_SessionReport] = []
     exit_code = 0
     for path in files:
         report = _build_session_report(path, cfg)
-        reports.append(report)
+        session_reports.append(report)
         if report.parse_confidence < 0.9:
             exit_code = 2
 
     output_dir.mkdir(parents=True, exist_ok=True)
     explain = bool(args.explain)
     if args.format == "json":
-        payload = _render_report_json(reports, explain=explain)
+        payload = _render_report_json(session_reports, explain=explain)
         _write_report(output_dir / "report.json", payload)
         sys.stdout.write(payload)
     else:
-        payload = _render_report_markdown(reports, explain=explain)
+        payload = _render_report_markdown(session_reports, explain=explain)
         _write_report(output_dir / "report.md", payload)
         sys.stdout.write(payload)
     sys.stdout.flush()
     return exit_code
+
+
+def _run_report_group_by(
+    args: argparse.Namespace,
+    *,
+    cfg: dict[str, Any],
+    dimension: str,
+) -> int:
+    """Run the cohort trend table report for ``--group-by DIMENSION``."""
+    from typing import cast
+
+    from codevigil.analysis.cohort import GroupByDimension
+    from codevigil.report.loader import expand_to_jsonl_paths, load_reports_from_jsonl
+    from codevigil.report.renderer import render_group_by_report
+
+    if dimension not in VALID_DIMENSIONS:
+        sys.stderr.write(
+            f"CRITICAL: cli.report.bad_group_by: "
+            f"unsupported dimension {dimension!r}; "
+            f"valid: {sorted(VALID_DIMENSIONS)!r}\n"
+        )
+        return 2
+
+    try:
+        output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
+        return 2
+
+    since_date = _parse_date_only(getattr(args, "from_date", None))
+    until_date = _parse_date_only(getattr(args, "to_date", None))
+
+    paths = expand_to_jsonl_paths(args.path)
+    store_reports = load_reports_from_jsonl(paths, cfg=cfg)
+
+    payload = render_group_by_report(
+        store_reports,
+        dimension=cast(GroupByDimension, dimension),
+        since=since_date,
+        until=until_date,
+        cfg=cfg,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_report(output_dir / f"cohort_{dimension}.md", payload)
+    sys.stdout.write(payload)
+    sys.stdout.flush()
+    return 0
+
+
+def _run_report_compare_periods(
+    args: argparse.Namespace,
+    *,
+    cfg: dict[str, Any],
+    raw_periods: str,
+) -> int:
+    """Run the period-comparison report for ``--compare-periods A:B,C:D``."""
+    from codevigil.report.loader import expand_to_jsonl_paths, load_reports_from_jsonl
+    from codevigil.report.renderer import render_compare_periods_report
+
+    parsed = _parse_compare_periods_arg(raw_periods)
+    if parsed is None:
+        sys.stderr.write(
+            f"CRITICAL: cli.report.bad_compare_periods: "
+            f"expected format YYYY-MM-DD:YYYY-MM-DD,YYYY-MM-DD:YYYY-MM-DD, "
+            f"got {raw_periods!r}\n"
+        )
+        return 2
+    period_a_since, period_a_until, period_b_since, period_b_until = parsed
+
+    try:
+        output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
+        return 2
+
+    paths = expand_to_jsonl_paths(args.path)
+    store_reports = load_reports_from_jsonl(paths, cfg=cfg)
+
+    payload = render_compare_periods_report(
+        store_reports,
+        period_a_since=period_a_since,
+        period_a_until=period_a_until,
+        period_b_since=period_b_since,
+        period_b_until=period_b_until,
+        cfg=cfg,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_report(output_dir / "compare_periods.md", payload)
+    sys.stdout.write(payload)
+    sys.stdout.flush()
+    return 0
+
+
+def _parse_date_only(value: str | None) -> date | None:
+    """Parse a ``YYYY-MM-DD`` string to a :class:`date`, or return ``None``."""
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError:
+        return None
+
+
+def _parse_compare_periods_arg(
+    raw: str,
+) -> tuple[date, date, date, date] | None:
+    """Parse ``YYYY-MM-DD:YYYY-MM-DD,YYYY-MM-DD:YYYY-MM-DD`` into four dates.
+
+    Returns ``None`` on any parse failure.
+    """
+    parts = raw.strip().split(",")
+    if len(parts) != 2:
+        return None
+    a_part, b_part = parts[0].strip(), parts[1].strip()
+
+    a_dates = a_part.split(":")
+    b_dates = b_part.split(":")
+    if len(a_dates) != 2 or len(b_dates) != 2:
+        return None
+
+    try:
+        a_since = date.fromisoformat(a_dates[0].strip())
+        a_until = date.fromisoformat(a_dates[1].strip())
+        b_since = date.fromisoformat(b_dates[0].strip())
+        b_until = date.fromisoformat(b_dates[1].strip())
+    except ValueError:
+        return None
+
+    return a_since, a_until, b_since, b_until
 
 
 def _parse_date_filter(value: str | None, *, end_of_day: bool) -> datetime | None:

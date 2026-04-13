@@ -116,9 +116,11 @@ codevigil --config ./local.toml watch
 ```text
 codevigil report PATH [--from YYYY-MM-DD] [--to YYYY-MM-DD]
                       [--format {json,markdown}] [--output DIR]
+                      [--group-by {day,week,project,model,permission_mode}]
+                      [--compare-periods A_START:A_END,B_START:B_END]
 ```
 
-Batch analysis over one or more session files. Walks the input, parses each file, runs every v0.1 collector, and writes a deterministic report to `report.output_dir` (or `--output`).
+Batch analysis over one or more session files. With no cohort flags, walks the input, parses each file, runs every enabled collector, and writes a deterministic per-session report. With `--group-by` or `--compare-periods`, produces a Markdown cohort report instead.
 
 ### Positional argument
 
@@ -132,8 +134,10 @@ Batch analysis over one or more session files. Walks the input, parses each file
 | -------------------------- | ----------------------------------------------------------------------- |
 | `--from YYYY-MM-DD`        | Drop sessions whose first event timestamp is strictly before this date. |
 | `--to YYYY-MM-DD`          | Drop sessions whose first event timestamp is strictly after this date.  |
-| `--format {json,markdown}` | Output format. Default `json`.                                          |
+| `--format {json,markdown}` | Output format for the per-session report. Default `json`.               |
 | `--output DIR`             | Override the report output directory. Must resolve under `$HOME`.       |
+| `--group-by DIMENSION`     | Produce a cohort trend table. See below. Incompatible with `--compare-periods`. |
+| `--compare-periods RANGES` | Compare two date ranges. See below. Incompatible with `--group-by`.     |
 
 ### JSON output shape
 
@@ -187,6 +191,81 @@ project: my-project
 | stop_phrase     | 0     | OK       | 0 hits                        |
 ```
 
+### --group-by cohort trend report
+
+When `--group-by DIMENSION` is provided, codevigil aggregates all sessions into cohort cells grouped by the chosen dimension and emits a Markdown trend table. The per-session `--format` and JSON output are not produced.
+
+Valid dimensions:
+
+| Dimension       | Groups sessions by                                             |
+| --------------- | -------------------------------------------------------------- |
+| `day`           | Calendar date of the first event (UTC).                        |
+| `week`          | ISO 8601 week (`YYYY-Www`).                                    |
+| `project`       | Project hash derived from the session file path.               |
+| `model`         | Model identifier from session metadata.                        |
+| `permission_mode` | Permission mode from session metadata.                       |
+
+Each cell in the trend table shows `mean ± stdev (n)`. Cells with fewer than 5 observations are replaced with the sentinel `n<5` and are not used in any headline reporting.
+
+Output shape:
+
+```markdown
+# Cohort Trend Report — by week
+
+| week    | Parse Health       | Read:Edit Ratio    | Write Precision    |
+| ---     | ---                | ---                | ---                |
+| 2026-W14 | 0.99 ± 0.01 (n=10) | 4.20 ± 1.31 (n=10) | 0.43 ± 0.12 (n=10) |
+| 2026-W15 | 0.98 ± 0.02 (n=15) | 3.80 ± 0.98 (n=15) | 0.51 ± 0.09 (n=15) |
+
+## Methodology
+
+...
+
+## Appendix
+
+### Behavioral Catalog
+...
+
+### Threshold Table
+...
+```
+
+The report is written to `cohort_<dimension>.md` in the output directory (e.g., `cohort_week.md`) and also printed to stdout.
+
+### --compare-periods comparison report
+
+When `--compare-periods A_START:A_END,B_START:B_END` is provided, codevigil filters sessions into two non-overlapping date ranges, runs Welch's t-test on each shared metric, and emits a signed delta table with a prose one-liner per metric.
+
+Date range format: `YYYY-MM-DD:YYYY-MM-DD,YYYY-MM-DD:YYYY-MM-DD`. Both start dates are inclusive; both end dates are inclusive. Periods need not be contiguous.
+
+Output shape:
+
+```markdown
+# Period Comparison: 2026-03-30..2026-04-05 vs 2026-04-06..2026-04-12
+
+Sessions in period A: 10 — Sessions in period B: 10
+
+| Metric          | Period A mean | Period B mean | Delta | Delta% | Significant |
+| ---             | ---           | ---           | ---   | ---    | ---         |
+| read_edit_ratio | 4.20 (n=10)   | 3.80 (n=10)   | -0.40 | -9.5%  | no          |
+
+## Summary
+
+- **read_edit_ratio**: fell from 4.2 to 3.8 over the 2026-04-06..2026-04-12 window; n=10, n=10
+
+## Methodology
+
+...
+
+## Appendix
+
+...
+```
+
+The report is written to `compare_periods.md` in the output directory and also printed to stdout. Metrics where either period has fewer than 5 sessions are excluded from headline one-liners; the table still shows the `n<5` sentinel.
+
+`--group-by` and `--compare-periods` are mutually exclusive. Supplying both exits 2 immediately.
+
 ### Output directory
 
 The default output directory is `~/.local/share/codevigil/reports/`. Override via `--output DIR` or `report.output_dir` in config. The resolved path **must** be under `$HOME` — codevigil refuses to write outside the home directory and exits 2 with `PrivacyViolationError` if you point `--output` elsewhere.
@@ -194,7 +273,7 @@ The default output directory is `~/.local/share/codevigil/reports/`. Override vi
 ### Exit codes
 
 - `0` — success, no integrity issues
-- `2` — at least one session had `parse_confidence < 0.9` (parse_health CRITICAL), OR `--output` resolved outside `$HOME`, OR a config error
+- `2` — at least one session had `parse_confidence < 0.9` (parse_health CRITICAL), OR `--output` resolved outside `$HOME`, OR a config error, OR `--group-by` and `--compare-periods` used together, OR `--compare-periods` date format is invalid
 
 The non-zero exit on parse_health degradation is intentional: it lets shell scripts and CI jobs detect data integrity failures without parsing the report content.
 
@@ -206,6 +285,15 @@ codevigil report ~/.claude/projects --format markdown
 codevigil report sessions/ --from 2026-04-01 --to 2026-04-30
 codevigil report 'sessions/*.jsonl' --format json --output ~/reports
 codevigil --explain report sessions/ --format markdown
+
+# Cohort trend — group by ISO week
+codevigil report ~/.claude/projects --group-by week
+codevigil report sessions/ --from 2026-01-01 --to 2026-03-31 --group-by week
+codevigil report ~/.claude/projects --group-by project
+
+# Period comparison — two four-week windows
+codevigil report ~/.claude/projects --compare-periods 2026-03-01:2026-03-31,2026-04-01:2026-04-30
+codevigil report sessions/ --compare-periods 2026-03-30:2026-04-05,2026-04-06:2026-04-12
 ```
 
 ---
