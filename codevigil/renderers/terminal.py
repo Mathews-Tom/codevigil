@@ -1,36 +1,23 @@
-"""Terminal renderer — ANSI-coloured full-redraw watch-mode output.
+"""Terminal renderer — rich-based full-redraw watch-mode output.
 
-The ``Renderer`` protocol (``codevigil.types.Renderer``) exposes only
-``render``, ``render_error``, and ``close``. For the terminal output shape
-documented in ``docs/design.md`` §CLI Modes → ``codevigil watch`` we need to
-know when a 1 Hz aggregator tick starts and ends: the aggregator iterates
-``(meta, snapshots)`` pairs and calls ``render()`` once per session, but the
-screen should be cleared exactly once per tick, not once per session.
+The ``Renderer`` protocol exposes ``render``, ``render_error``, and
+``close``. For the 1 Hz tick-based model we extend with ``begin_tick()``
+and ``end_tick()``.
 
-This module extends the frozen protocol with two optional methods,
-``begin_tick()`` and ``end_tick()``, that the CLI layer (next phase) will
-call around each tick's render loop. ``render()`` buffers the per-session
-block internally; ``end_tick()`` flushes all buffered blocks to the output
-stream in a single write, optionally preceded by an ANSI clear-screen
-sequence when writing to a TTY with colour enabled.
+``render()`` buffers a per-session block; ``end_tick()`` flushes all
+buffered blocks in a single ``Console.print(Group(*renderables))`` call,
+preceded by a TTY-only clear-screen so each tick replaces the previous one.
 
-Coloring uses raw ANSI escapes — no ``rich`` dependency — and is fully
-stripped when ``use_color=False`` so tests can capture plain text by
-routing through ``io.StringIO``. The clear-screen sequence is only emitted
-when the stream is an actual TTY (``stream.isatty()``) *and* ``use_color``
-is true; tests therefore receive clean append output even with colour on.
+Severity sort: ``(severity_rank, -updated_at, session_id)`` — CRITICAL
+sessions always appear first.
 
-Deliverables implemented in this module:
+Unique session labels: adaptively extend the hex-prefix length until all
+labels in the current tick are distinct.
 
-* Stable severity sort: ``(severity_rank, -updated_at, session_id)``.
-* Summary header: ``sessions=N crit=C warn=W ok=O projects=P updated=TS``.
-* Unique session labels: adaptively extend the hex-prefix length until all
-  labels in the current tick are distinct; label is stable within a session's
-  lifetime and only recomputed on fleet-composition change.
-* Mini-trends: inline arrow + last-3 values, e.g. ``5.2 [↗3.2→4.1→5.2]``.
-* Percentile anchors: ``21.0 [p92 of your baseline]`` when store is loaded;
-  ``[n/a]`` when store is empty or persistence is disabled.
-* Stop-phrase context snippets: ``context_snippet`` from the detail payload.
+Mini-trends: inline arrow + last-3 values, e.g. ``[↗3.2→4.1→5.2]``.
+
+Percentile anchors: ``[p92 of your baseline]`` when the store is loaded;
+``[n/a]`` when the store is empty or persistence is disabled.
 """
 
 from __future__ import annotations
@@ -40,7 +27,12 @@ import sys
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import TYPE_CHECKING, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
+
+import rich.console
+import rich.rule
+import rich.table
+import rich.text
 
 from codevigil.errors import CodevigilError, ErrorLevel
 from codevigil.types import MetricSnapshot, SessionMeta, SessionState, Severity
@@ -48,13 +40,15 @@ from codevigil.types import MetricSnapshot, SessionMeta, SessionState, Severity
 if TYPE_CHECKING:
     from codevigil.analysis.store import SessionStore
 
-_OK_COLOR: str = "\x1b[32m"
-_WARN_COLOR: str = "\x1b[33m"
-_CRITICAL_COLOR: str = "\x1b[31m"
-_RESET: str = "\x1b[0m"
-_DIM: str = "\x1b[2m"
-_BOLD: str = "\x1b[1m"
-_CLEAR_SCREEN: str = "\x1b[2J\x1b[H"
+# ---------------------------------------------------------------------------
+# Style constants
+# ---------------------------------------------------------------------------
+
+_OK_STYLE = "green"
+_WARN_STYLE = "yellow"
+_CRITICAL_STYLE = "red"
+_DIM_STYLE = "dim"
+_BOLD_STYLE = "bold"
 
 _SEVERITY_WORD: dict[Severity, str] = {
     Severity.OK: "OK",
@@ -62,13 +56,13 @@ _SEVERITY_WORD: dict[Severity, str] = {
     Severity.CRITICAL: "CRIT",
 }
 
-_SEVERITY_COLOR: dict[Severity, str] = {
-    Severity.OK: _OK_COLOR,
-    Severity.WARN: _WARN_COLOR,
-    Severity.CRITICAL: _CRITICAL_COLOR,
+_SEVERITY_STYLE: dict[Severity, str] = {
+    Severity.OK: _OK_STYLE,
+    Severity.WARN: _WARN_STYLE,
+    Severity.CRITICAL: _CRITICAL_STYLE,
 }
 
-# Numeric rank for severity sort: CRITICAL sorts first (lowest rank number).
+# Numeric rank — CRITICAL sorts first (lowest rank).
 _SEVERITY_RANK: dict[Severity, int] = {
     Severity.CRITICAL: 0,
     Severity.WARN: 1,
@@ -81,40 +75,49 @@ _STATE_WORD: dict[SessionState, str] = {
     SessionState.EVICTED: "EVICTED",
 }
 
-_STATE_COLOR: dict[SessionState, str] = {
-    SessionState.ACTIVE: _OK_COLOR,
-    SessionState.STALE: _DIM,
-    SessionState.EVICTED: _CRITICAL_COLOR,
+_STATE_STYLE: dict[SessionState, str] = {
+    SessionState.ACTIVE: _OK_STYLE,
+    SessionState.STALE: _DIM_STYLE,
+    SessionState.EVICTED: _CRITICAL_STYLE,
 }
 
 _PARSE_HEALTH_METRIC: str = "parse_health"
-_RULE: str = "─" * 70
 
-# Minimum prefix length for session label disambiguation.
 _MIN_PREFIX: int = 8
-# Store refresh interval in ticks: re-read baseline percentiles every 60 ticks
-# rather than every tick. Prevents O(N) store reads on every 1 Hz tick.
+# Store refresh interval: re-read baseline percentiles every 60 ticks.
 _STORE_REFRESH_TICKS: int = 60
+
+# ---------------------------------------------------------------------------
+# Session block
+# ---------------------------------------------------------------------------
 
 
 @dataclass
 class _SessionBlock:
     """Buffered render output for one session in the current tick."""
 
-    banner_lines: list[str] = field(default_factory=list)  # CRITICAL → above header
-    body_lines: list[str] = field(default_factory=list)
-    footer_lines: list[str] = field(default_factory=list)  # WARN/ERROR → below body
-    # Sort key: (severity_rank, -updated_at_ts, session_id)
+    # CRITICAL banners — appear above the session header.
+    banner_items: list[rich.text.Text] = field(default_factory=list)
+    # Session header line and metric table built during render().
+    session_header: rich.text.Text | None = None
+    metric_table: rich.table.Table | None = None
+    # WARN/ERROR footers — appear below the metric table.
+    footer_items: list[rich.text.Text] = field(default_factory=list)
+
     severity_rank: int = _SEVERITY_RANK[Severity.OK]
     updated_at_ts: float = 0.0
     session_id: str = ""
-    # Fleet-counter metadata populated by render().
     updated_dt: datetime | None = None
     project_key: str = ""
 
 
+# ---------------------------------------------------------------------------
+# Renderer
+# ---------------------------------------------------------------------------
+
+
 class TerminalRenderer:
-    """ANSI full-redraw renderer for ``codevigil watch``."""
+    """Rich-based full-redraw renderer for ``codevigil watch``."""
 
     name: str = "terminal"
 
@@ -127,22 +130,21 @@ class TerminalRenderer:
         baseline_store: SessionStore | None = None,
     ) -> None:
         self._stream: TextIO = stream if stream is not None else sys.stdout
-        self._show_experimental_badge: bool = show_experimental_badge
-        self._use_color: bool = use_color
+        self._use_color = use_color
+        self._show_experimental_badge = show_experimental_badge
+        self._console = self._make_console()
+
         self._blocks: dict[str, _SessionBlock] = {}
         self._order: list[str] = []
         self._parse_confidence: float = 1.0
-        # Stable label map: maps session_id → display label. Rebuilt only
-        # when the set of session IDs changes (fleet-composition change).
+
         self._label_map: dict[str, str] = {}
         self._label_fleet: frozenset[str] = frozenset()
-        # Percentile baseline: metric_name → sorted list of historical values
-        # loaded from the store at startup and refreshed every
-        # _STORE_REFRESH_TICKS ticks.
+
         self._baseline_store: SessionStore | None = baseline_store
         self._baseline: dict[str, list[float]] = {}
-        self._ticks_since_store_refresh: int = _STORE_REFRESH_TICKS  # load on first tick
-        # Fleet-level counters updated each tick by end_tick().
+        self._ticks_since_store_refresh: int = _STORE_REFRESH_TICKS
+
         self._fleet_sessions: int = 0
         self._fleet_crit: int = 0
         self._fleet_warn: int = 0
@@ -150,14 +152,21 @@ class TerminalRenderer:
         self._fleet_projects: int = 0
         self._fleet_updated: datetime | None = None
 
+    def _make_console(self) -> rich.console.Console:
+        # force_terminal mirrors use_color so the color-mode test emits ANSI
+        # even when the stream is a StringIO.
+        return rich.console.Console(
+            file=self._stream,
+            force_terminal=self._use_color,
+            highlight=False,
+        )
+
     # ---------------------------------------------------------- tick lifecycle
 
     def begin_tick(self) -> None:
         """Start a new tick — drop any previously buffered blocks."""
-
         self._blocks = {}
         self._order = []
-        # Refresh the percentile baseline on a long interval.
         self._ticks_since_store_refresh += 1
         if self._ticks_since_store_refresh >= _STORE_REFRESH_TICKS:
             self._refresh_baseline()
@@ -165,18 +174,17 @@ class TerminalRenderer:
 
     def end_tick(self) -> None:
         """Flush buffered blocks to the output stream in a single write."""
-
-        # Compute fleet-level counters before sorting.
-        projects: set[str] = set()
-        crit = warn = ok = 0
-        latest_ts: float = 0.0
-        latest_dt: datetime | None = None
-
-        # Rebuild the stable label map when fleet composition changes.
+        # Rebuild label map when fleet composition changes.
         current_ids = frozenset(self._blocks)
         if current_ids != self._label_fleet:
             self._label_map = _build_label_map(list(current_ids))
             self._label_fleet = current_ids
+
+        # Compute fleet-level counters.
+        projects: set[str] = set()
+        crit = warn = ok = 0
+        latest_ts: float = 0.0
+        latest_dt: datetime | None = None
 
         for block in self._blocks.values():
             if block.severity_rank == _SEVERITY_RANK[Severity.CRITICAL]:
@@ -198,7 +206,6 @@ class TerminalRenderer:
         self._fleet_projects = len(projects)
         self._fleet_updated = latest_dt
 
-        # Stable sort: (severity_rank ASC, -updated_at_ts DESC, session_id ASC)
         sorted_ids = sorted(
             self._order,
             key=lambda sid: (
@@ -208,24 +215,27 @@ class TerminalRenderer:
             ),
         )
 
-        parts: list[str] = []
+        # Rebuild Console from stream each tick so external stream swaps
+        # in tests are respected (self._stream is always the current target).
+        self._console = self._make_console()
+
         if self._use_color and self._stream_is_tty():
-            parts.append(_CLEAR_SCREEN)
-        parts.append(self._header_line())
-        parts.append("\n")
+            self._stream.write("\x1b[2J\x1b[H")
+            self._stream.flush()
+
+        renderables: list[Any] = [self._header_text()]
         for session_id in sorted_ids:
             block = self._blocks[session_id]
-            for line in block.banner_lines:
-                parts.append(line)
-                parts.append("\n")
-            for line in block.body_lines:
-                parts.append(line)
-                parts.append("\n")
-            for line in block.footer_lines:
-                parts.append(line)
-                parts.append("\n")
-        self._stream.write("".join(parts))
-        self._stream.flush()
+            renderables.extend(block.banner_items)
+            if block.session_header is not None:
+                renderables.append(block.session_header)
+            renderables.append(rich.rule.Rule(style="dim"))
+            if block.metric_table is not None:
+                renderables.append(block.metric_table)
+            renderables.append(rich.rule.Rule(style="dim"))
+            renderables.extend(block.footer_items)
+
+        self._console.print(rich.console.Group(*renderables))
         self._blocks = {}
         self._order = []
 
@@ -233,7 +243,6 @@ class TerminalRenderer:
 
     def render(self, snapshots: list[MetricSnapshot], meta: SessionMeta) -> None:
         """Buffer one session's block for the current tick."""
-
         block = self._blocks.get(meta.session_id)
         if block is None:
             block = _SessionBlock()
@@ -241,48 +250,51 @@ class TerminalRenderer:
             self._order.append(meta.session_id)
         block.session_id = meta.session_id
 
-        # Compute the worst severity across all snapshots.
-        worst = _SEVERITY_RANK[Severity.OK]
-        for snap in snapshots:
-            rank = _SEVERITY_RANK.get(snap.severity, _SEVERITY_RANK[Severity.OK])
-            if rank < worst:
-                worst = rank
-        block.severity_rank = worst
+        ok_rank = _SEVERITY_RANK[Severity.OK]
+        block.severity_rank = min(
+            (_SEVERITY_RANK.get(s.severity, ok_rank) for s in snapshots),
+            default=ok_rank,
+        )
         block.updated_at_ts = meta.last_event_time.timestamp()
         block.updated_dt = meta.last_event_time
         block.project_key = meta.project_name or meta.project_hash[:8]
 
-        block.body_lines.extend(self._session_body(snapshots, meta))
+        self._parse_confidence = next(
+            (s.value for s in snapshots if s.name == _PARSE_HEALTH_METRIC),
+            meta.parse_confidence,
+        )
+
+        block.session_header = self._session_header_text(meta)
+        block.metric_table = self._build_metric_table(snapshots, meta)
 
     def render_error(self, err: CodevigilError, meta: SessionMeta | None) -> None:
-        """Route errors by level per design.md §Error Taxonomy → Levels and Routes.
+        """Route errors by level per design.md §Error Taxonomy.
 
-        INFO → silent (log file only). WARN → dim footer under the session
-        block. ERROR → bright (non-dim) footer under the session block.
+        INFO → silent. WARN → dim footer. ERROR → bold footer.
         CRITICAL → red banner above the session header.
         """
-
         if err.level is ErrorLevel.INFO:
             return
+
         session_id = meta.session_id if meta is not None else ""
         block = self._blocks.get(session_id)
         if block is None:
             block = _SessionBlock()
             self._blocks[session_id] = block
             self._order.append(session_id)
-        text = f"{err.code}: {err.message}"
+
+        text_content = f"{err.code}: {err.message}"
         if err.level is ErrorLevel.WARN:
-            block.footer_lines.append(self._paint(f"  ! {text}", _DIM))
+            block.footer_items.append(rich.text.Text(f"  ! {text_content}", style="dim"))
         elif err.level is ErrorLevel.ERROR:
-            block.footer_lines.append(self._paint(f"  !! {text}", _WARN_COLOR + _BOLD))
+            block.footer_items.append(rich.text.Text(f"  !! {text_content}", style="bold yellow"))
         elif err.level is ErrorLevel.CRITICAL:
-            block.banner_lines.append(self._paint(f"!!! CRITICAL {text}", _CRITICAL_COLOR + _BOLD))
+            block.banner_items.append(
+                rich.text.Text(f"!!! CRITICAL {text_content}", style="bold red")
+            )
 
     def close(self) -> None:
-        """Flush the output stream. No persistent handles to release."""
-
         with contextlib.suppress(ValueError):
-            # Stream already closed — nothing to flush.
             self._stream.flush()
 
     # --------------------------------------------------------------- helpers
@@ -296,102 +308,85 @@ class TerminalRenderer:
         except ValueError:
             return False
 
-    def _paint(self, text: str, color: str) -> str:
-        if not self._use_color:
-            return text
-        return f"{color}{text}{_RESET}"
-
-    def _header_line(self) -> str:
-        """Emit the top-line summary header.
-
-        Format: ``codevigil [experimental thresholds] | sessions=N crit=C
-        warn=W ok=O projects=P updated=TS | parse_confidence: X.XX``
-        """
-        parts: list[str] = [self._paint("codevigil", _BOLD)]
+    def _header_text(self) -> rich.text.Text:
+        """Build the top-line fleet summary as a rich Text object."""
+        t = rich.text.Text()
+        t.append("codevigil", style=_BOLD_STYLE)
         if self._show_experimental_badge:
-            parts.append(self._paint("[experimental thresholds]", _DIM + _WARN_COLOR))
+            t.append(" [experimental thresholds]", style=f"{_DIM_STYLE} {_WARN_STYLE}")
         ts = self._fleet_updated.isoformat(timespec="seconds") if self._fleet_updated else "—"
-        summary = (
-            f"sessions={self._fleet_sessions} "
-            f"crit={self._fleet_crit} "
-            f"warn={self._fleet_warn} "
-            f"ok={self._fleet_ok} "
-            f"projects={self._fleet_projects} "
-            f"updated={ts}"
+        t.append(
+            f" | sessions={self._fleet_sessions}"
+            f" crit={self._fleet_crit}"
+            f" warn={self._fleet_warn}"
+            f" ok={self._fleet_ok}"
+            f" projects={self._fleet_projects}"
+            f" updated={ts}"
+            f" | parse_confidence: {self._parse_confidence:.2f}"
         )
-        parts.append(f"| {summary} |")
-        parts.append(f"parse_confidence: {self._parse_confidence:.2f}")
-        return " ".join(parts)
+        return t
 
-    def _session_body(self, snapshots: list[MetricSnapshot], meta: SessionMeta) -> list[str]:
-        lines: list[str] = []
-        # Pick parse_confidence for the header from either meta or a
-        # parse_health snapshot if present.
-        pc = meta.parse_confidence
-        for snap in snapshots:
-            if snap.name == _PARSE_HEALTH_METRIC:
-                pc = snap.value
-                break
-        self._parse_confidence = pc
-        lines.append(self._session_line(meta))
-        lines.append(self._paint(_RULE, _DIM))
-        for snap in snapshots:
-            lines.append(self._metric_line(snap, meta))
-        lines.append(self._paint(_RULE, _DIM))
-        return lines
-
-    def _session_line(self, meta: SessionMeta) -> str:
+    def _session_header_text(self, meta: SessionMeta) -> rich.text.Text:
         label = self._label_map.get(meta.session_id, meta.session_id[:_MIN_PREFIX])
         project = meta.project_name or meta.project_hash[:8]
         duration = _format_duration((meta.last_event_time - meta.start_time).total_seconds())
         state_word = _STATE_WORD[meta.state]
-        state_colored = self._paint(state_word, _STATE_COLOR[meta.state])
-        return f"session: {label} | project: {project} | {duration} {state_colored}"
+        state_style = _STATE_STYLE[meta.state]
 
-    def _metric_line(self, snap: MetricSnapshot, meta: SessionMeta) -> str:
-        name = f"{snap.name:<18}"
-        value_str = f"{snap.value:>6.1f}"
-        sev_word = _SEVERITY_WORD[snap.severity]
-        sev_colored = self._paint(sev_word, _SEVERITY_COLOR[snap.severity])
-        label = f"[{snap.label}]" if snap.label else ""
+        t = rich.text.Text()
+        t.append(f"session: {label} | project: {project} | {duration} ")
+        t.append(state_word, style=state_style)
+        return t
 
-        # Mini-trend: append [↗v1→v2→v3] when history has ≥2 entries.
-        history = meta.snapshot_history.get(snap.name)
-        trend_str = ""
-        if history and len(history) >= 2:
-            trend_str = " " + self._paint(_format_trend(history), _DIM)
+    def _build_metric_table(
+        self, snapshots: list[MetricSnapshot], meta: SessionMeta
+    ) -> rich.table.Table:
+        tbl = rich.table.Table(
+            show_header=False,
+            box=None,
+            padding=(0, 1),
+            show_edge=False,
+        )
+        tbl.add_column(min_width=20, no_wrap=True)  # metric name (padded)
+        tbl.add_column(justify="right", style="dim")  # value
+        tbl.add_column(justify="center")  # severity (styled)
+        tbl.add_column(style="dim")  # annotations
 
-        # Percentile anchor: [p92 of your baseline]
-        pct_str = ""
-        pct_label = self._percentile_label(snap.name, snap.value)
-        if pct_label:
-            pct_str = " " + self._paint(pct_label, _DIM)
+        for snap in snapshots:
+            sev_style = _SEVERITY_STYLE[snap.severity]
+            sev_word = _SEVERITY_WORD[snap.severity]
+            sev_text = rich.text.Text(sev_word, style=sev_style)
 
-        hint = self._actionable_hint(snap)
-        hint_str = ""
-        if hint:
-            hint_str = " " + self._paint(hint, _DIM)
+            ann = rich.text.Text()
+            if snap.label:
+                ann.append(f"[{snap.label}]")
 
-        return f"  {name} {value_str}   {sev_colored}   {label}{trend_str}{pct_str}{hint_str}"
+            history = meta.snapshot_history.get(snap.name)
+            if history and len(history) >= 2:
+                ann.append(f" {_format_trend(history)}")
+
+            pct_label = self._percentile_label(snap.name, snap.value)
+            if pct_label:
+                ann.append(f" {pct_label}")
+
+            hint = self._actionable_hint(snap)
+            if hint:
+                ann.append(f" {hint}")
+
+            tbl.add_row(f"  {snap.name}", f"{snap.value:.1f}", sev_text, ann)
+
+        return tbl
 
     def _percentile_label(self, metric_name: str, value: float) -> str:
-        """Return ``[pN of your baseline]`` or ``[n/a]`` when no baseline."""
         baseline = self._baseline.get(metric_name)
         if not baseline:
             return "[n/a]"
-        # Compute percentile rank: what fraction of baseline values are ≤ value?
         n = len(baseline)
         count_le = sum(1 for v in baseline if v <= value)
         pct = round(count_le / n * 100)
         return f"[p{pct} of your baseline]"
 
     def _refresh_baseline(self) -> None:
-        """Load metric value distributions from the session store (bounded I/O).
-
-        Called at most once per ``_STORE_REFRESH_TICKS`` ticks. When the store
-        is None or the directory is empty, sets ``_baseline`` to ``{}`` so
-        ``_percentile_label`` returns ``[n/a]`` for every metric. Never raises.
-        """
         store = self._baseline_store
         if store is None:
             self._baseline = {}
@@ -415,37 +410,29 @@ class TerminalRenderer:
         self._baseline = {name: sorted(vals) for name, vals in by_metric.items()}
 
     def _actionable_hint(self, snap: MetricSnapshot) -> str:
-        """Build a one-line drill-down hint appended after the label.
-
-        A bare severity badge is not actionable — "CRIT reasoning_loop"
-        tells the user something is wrong but not what threshold was
-        crossed or what the most recent trigger looked like. This
-        helper reads the structured ``detail`` payload every collector
-        already emits and turns the relevant fields into a short
-        secondary string.
-        """
-
         detail = snap.detail
         if not detail:
             return ""
         name = snap.name
         if name == "stop_phrase":
             recent = detail.get("recent_hits")
-            if isinstance(recent, list) and recent:
-                latest = recent[-1]
-                phrase = latest.get("phrase") if isinstance(latest, dict) else None
-                category = latest.get("category") if isinstance(latest, dict) else None
-                snippet = latest.get("context_snippet") if isinstance(latest, dict) else None
-                if isinstance(phrase, str):
-                    hint_parts: list[str] = [f"last: {phrase!r}"]
-                    if isinstance(category, str):
-                        hint_parts.append(f"({category})")
-                    if isinstance(snippet, str) and snippet:
-                        # Show up to 40 chars of the context snippet.
-                        trunc = snippet[:40].replace("\n", " ")
-                        hint_parts.append(f"ctx: {trunc!r}")
-                    return " ".join(hint_parts)
-            return ""
+            if not (isinstance(recent, list) and recent):
+                return ""
+            latest = recent[-1]
+            if not isinstance(latest, dict):
+                return ""
+            phrase = latest.get("phrase")
+            if not isinstance(phrase, str):
+                return ""
+            hint_parts: list[str] = [f"last: {phrase!r}"]
+            category = latest.get("category")
+            if isinstance(category, str):
+                hint_parts.append(f"({category})")
+            snippet = latest.get("context_snippet")
+            if isinstance(snippet, str) and snippet:
+                trunc = snippet[:40].replace("\n", " ")
+                hint_parts.append(f"ctx: {trunc!r}")
+            return " ".join(hint_parts)
         if name == "reasoning_loop":
             burst = detail.get("max_burst")
             calls = detail.get("tool_calls")
@@ -474,13 +461,7 @@ class TerminalRenderer:
 
 
 def _build_label_map(session_ids: list[str]) -> dict[str, str]:
-    """Build a stable label map with adaptive prefix length.
-
-    Start at ``_MIN_PREFIX`` characters and extend until all labels in the
-    batch are unique. If session IDs are fewer than _MIN_PREFIX characters
-    long, the full ID is used. The result is stable: the same set of IDs
-    always maps to the same labels.
-    """
+    """Build a stable label map with adaptive prefix length."""
     if not session_ids:
         return {}
     prefix_len = _MIN_PREFIX
@@ -491,11 +472,9 @@ def _build_label_map(session_ids: list[str]) -> dict[str, str]:
         if len(labels) == len(set(labels)):
             return candidate
         prefix_len += 1
-    # All labels still collide at full length — append a counter to the
-    # last few characters to force uniqueness.
     result: dict[str, str] = {}
     seen: dict[str, int] = {}
-    for sid in sorted(session_ids):  # sorted for determinism
+    for sid in sorted(session_ids):
         base = sid[:max_len]
         count = seen.get(base, 0)
         seen[base] = count + 1
@@ -513,7 +492,6 @@ _TREND_FLAT: str = "→"
 
 
 def _trend_arrow(values: tuple[float, ...]) -> str:
-    """Return a single trend arrow based on the last two values."""
     if len(values) < 2:
         return _TREND_FLAT
     delta = values[-1] - values[-2]
