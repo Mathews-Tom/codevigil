@@ -18,10 +18,11 @@ codevigil makes session quality observable.
 
 ```mermaid
 flowchart TD
-    CLI["CLI<br/>(watch | report | export)"]
+    CLI["CLI<br/>(watch | report | export | history)"]
 
     CLI --> Watcher["Watcher<br/>PollingSource → inotify/fsevents"]
     CLI --> Batch["BatchReader<br/>glob + read"]
+    CLI --> HistoryDispatch["history/<br/>list | detail | diff | heatmap"]
 
     Watcher --> Parser
     Batch --> Parser
@@ -42,6 +43,7 @@ flowchart TD
     Aggregator["Aggregator<br/>session lifecycle<br/>tick loop + error routing"]
 
     Aggregator -->|snapshots + SessionMeta| RendererBoundary
+    Aggregator -.->|"opt-in persistence<br/>[storage] enable_persistence"| SessionStore
 
     subgraph RendererBoundary["Renderers — plugin boundary"]
         direction LR
@@ -50,19 +52,26 @@ flowchart TD
         R3["Future:<br/>MCP / Hook / Dashboard"]
     end
 
+    SessionStore[("SessionStore<br/>~/.local/state/codevigil/sessions/")]
+    SessionStore --> AnalysisPkg["analysis/<br/>cohort · compare · guards"]
+    AnalysisPkg --> CohortReport["Cohort Report<br/>--group-by | --compare-periods"]
+    HistoryDispatch --> SessionStore
+
     Aggregator -.->|CodevigilError| ErrorChannel[("Error channel<br/>log file + stderr")]
 
     classDef boundary fill:#1f2937,stroke:#60a5fa,stroke-width:2px,color:#f8fafc;
     classDef core fill:#0f172a,stroke:#94a3b8,color:#f8fafc;
     classDef err fill:#450a0a,stroke:#f87171,color:#fecaca;
+    classDef store fill:#14532d,stroke:#4ade80,color:#f8fafc;
     class CollectorBoundary,RendererBoundary boundary;
-    class CLI,Watcher,Batch,Parser,Aggregator core;
+    class CLI,Watcher,Batch,Parser,Aggregator,HistoryDispatch,AnalysisPkg,CohortReport core;
     class ErrorChannel err;
+    class SessionStore store;
 ```
 
 ### Why This Shape
 
-Two plugin boundaries. Collectors and renderers are the two axes of future expansion. New metric = new collector, no existing code touched. New output target = new renderer, same deal. The parser-to-collector interface (Event) and the collector-to-renderer interface (Snapshot) are the two contracts that need to stay stable.
+Three extension axes. Collectors and renderers are the two axes of real-time expansion. New metric = new collector, no existing code touched. New output target = new renderer, same deal. The third axis — retrospective analysis — runs off the `SessionStore`: new group-by dimensions and new report renderers layer onto `analysis/` without touching the live pipeline. The parser-to-collector interface (`Event`) and the collector-to-renderer interface (`MetricSnapshot`) are the two contracts that need to stay stable across all three axes.
 
 ## Core Abstractions
 
@@ -575,23 +584,23 @@ Live monitoring. Tails active sessions, refreshes terminal output every tick.
 ```bash
 $ codevigil watch
 
-codevigil [experimental thresholds] | parse_confidence: 1.00
+codevigil [experimental thresholds] | sessions=2 crit=0 warn=1 ok=1 projects=2 updated=2026-04-14T10:22:00 | parse_confidence: 1.00
 session: a3f7c2d | project: iree-loom | 2m 34s ACTIVE
 ──────────────────────────────────────────────────────────────────────
-  read_edit_ratio     5.2   OK     [R:E 5.2 | research:mut 7.1]
+  read_edit_ratio     5.2   OK     [R:E 5.2 | research:mut 7.1] [↗3.1→4.2→5.2] [p68 of your baseline]
   stop_phrase         0     OK     [0 hits]
-  reasoning_loop      6.4   OK     [6.4/1K tool calls | burst: 2]
+  reasoning_loop      6.4   OK     [6.4/1K tool calls | burst: 2] [↘8.1→7.2→6.4] [n/a]
 ──────────────────────────────────────────────────────────────────────
 
 session: b8e1f9a | project: iree-amdgpu | 14m 12s ACTIVE
 ──────────────────────────────────────────────────────────────────────
-  read_edit_ratio     1.8   CRIT   [R:E 1.8 | research:mut 2.3]
-  stop_phrase         3     WARN   [3 hits | last: "should I continue"]
-  reasoning_loop     18.2   WARN   [18.2/1K tool calls | burst: 7]
+  read_edit_ratio     1.8   CRIT   [R:E 1.8 | research:mut 2.3] [↘4.2→3.1→1.8] [p5 of your baseline]
+  stop_phrase         3     WARN   [3 hits | last: "should I continue"] [↗0→1→3] [p94 of your baseline]
+  reasoning_loop     18.2   WARN   [18.2/1K tool calls | burst: 7] [↗6.4→12.1→18.2] [p89 of your baseline]
 ──────────────────────────────────────────────────────────────────────
 ```
 
-Multi-session display. Most recent/active sessions first. Session state follows the ACTIVE → STALE → EVICTED lifecycle documented under **Watcher Design → Stale Session Policy** (defaults: 5 min to STALE, 35 min total to EVICTED).
+Multi-session display, sorted by worst severity first. The top line shows the fleet summary: session count, CRIT/WARN/OK tallies, project count, and ISO timestamp of the last tick. Each metric row appends a mini-trend (`[↗v1→v2→v3]`, last three snapshots) and a percentile anchor against the user's own session history from the `SessionStore` — `[n/a]` when the store is cold or persistence is disabled. Session state follows the ACTIVE → STALE → EVICTED lifecycle documented under **Watcher Design → Stale Session Policy** (defaults: 5 min to STALE, 35 min total to EVICTED).
 
 ### Project Name Resolution
 
@@ -609,14 +618,44 @@ The `[experimental thresholds]` marker in the header is present whenever any ena
 
 ### `codevigil report <path>`
 
-Batch analysis. Accepts a session file, directory of sessions, or glob pattern. Produces a JSON or Markdown report.
+Batch analysis. Accepts a session file, directory of sessions, or glob pattern. Two distinct output modes:
+
+**Per-session report** — one JSON or Markdown block per session, deterministic and diffable:
 
 ```bash
 $ codevigil report ~/.claude/projects/*/sessions/*.jsonl \
     --from 2026-03-01 --to 2026-03-31 --format markdown
 ```
 
-This is the mode that reproduces stellaraccident's analysis automatically.
+**Cohort trend table** — aggregates sessions into cells grouped by a dimension; cells with `n < 5` are replaced by the `n<5` sentinel:
+
+```bash
+$ codevigil report ~/.claude/projects --group-by week
+$ codevigil report sessions/ --group-by project
+```
+
+**Period-over-period comparison** — filters sessions into two date ranges, runs Welch's t-test per metric, emits a signed delta table and prose one-liner:
+
+```bash
+$ codevigil report ~/.claude/projects \
+    --compare-periods 2026-03-01:2026-03-31,2026-04-01:2026-04-30
+```
+
+Both cohort modes emit a `## Methodology` section (source size, date range, correlation-not-causation language) and a `## Appendix` (behavioral catalog, threshold table, sample-size distribution). `--group-by` and `--compare-periods` are mutually exclusive.
+
+### `codevigil history`
+
+Retrospective, read-only view of the `SessionStore`. Reads session reports written at eviction time when `[storage] enable_persistence = true`.
+
+```bash
+$ codevigil history list
+$ codevigil history list --project my-project --since 2026-04-01 --severity warn
+$ codevigil history agent-abc123def456       # detail view for one session
+$ codevigil history diff agent-abc123 agent-def456
+$ codevigil history heatmap agent-abc123
+```
+
+`history list` renders a rich formatted table. `history <SESSION_ID>` renders the session header, metric table, and stop-phrase context snippets with colored panels. `history diff` aligns two sessions by metric name using `difflib.SequenceMatcher` and renders a signed delta table. `history heatmap` renders a metric × severity matrix using `rich.table.Table`.
 
 ### `codevigil export <path>`
 
@@ -672,12 +711,12 @@ This is not paranoia — session JSONL contains verbatim code, prompts, file pat
 
 ## Watch Mode UX Limitations
 
-The zero-dependency constraint collides with the fancy multi-session terminal UI shown in the CLI Modes section. Honest limits:
+Known limitations of the current terminal renderer:
 
-1. **Full redraw, not diffed.** The terminal renderer clears the screen and redraws on every aggregator tick (default 1 Hz). On fast terminals this is fine; on slow SSH or tmux-over-high-latency links users will see flicker. Documented as a known limitation, not a bug. `rich`-based diff rendering is the v0.2 upgrade path.
+1. **Full redraw, not diffed.** The terminal renderer clears the screen and redraws on every aggregator tick (default 1 Hz). On fast terminals this is fine; on slow SSH or tmux-over-high-latency links users will see flicker. Documented as a known limitation, not a bug. Diff rendering via `rich.live.Live` is the v0.2 upgrade path.
 2. **No resize handling in v0.1.** If the terminal is resized mid-session, the next redraw adapts but the previous frame may leave artifacts. `SIGWINCH` handling is v0.2.
 3. **One renderer focus.** The v0.1 watch-mode default enables exactly one renderer: `terminal`. Report-mode defaults to `json_file`. Users who want both in watch mode opt in explicitly via config — composing live terminal output with file-append is valid but users should know they're doing it.
-4. **Scope narrowing.** v0.1 ships with `terminal` and `json_file` renderers. Any "dashboard" or "markdown" renderer is v0.2. This keeps the zero-dep surface honest.
+4. **Scope narrowing.** v0.1 ships with `terminal` and `json_file` renderers. Any "dashboard" or "markdown" renderer is v0.2.
 
 ## Extension Points (Post v0.1)
 
@@ -730,14 +769,14 @@ This enables self-aware agents — Claude Code could check its own quality metri
 
 ### Multi-Session Aggregation and Trending
 
-v0.1 computes per-session metrics. Future versions need cross-session trending:
+Cross-session analysis is implemented in the `codevigil/analysis/` package (shipped). The aggregator writes finalised session reports to `SessionStore` at eviction time when `[storage] enable_persistence = true`. The analysis layer provides:
 
-- Daily/weekly quality score
-- Regression detection (quality dropped compared to N-day baseline)
-- Time-of-day heatmaps
-- Per-project quality comparison
+- `analysis/store.py` — append-only JSON store with schema migration
+- `analysis/cohort.py` — reducer over many session reports with group-by: `day`, `week`, `project`, `model`, `permission_mode`
+- `analysis/compare.py` — Welch's t-test period-over-period comparison
+- `analysis/guards.py` — sample-size guard (`n < 5` → `"n<5"` sentinel, enforced in all output paths)
 
-This requires a persistence layer (SQLite, append-only JSON log, or similar). The aggregator's snapshot output is already structured enough to store directly. Add a `stores/` module with a `Store` protocol parallel to `Renderer`.
+The `codevigil history` subcommand family and the `report --group-by` / `report --compare-periods` flags both read from this store. Future work on this axis (additional group-by dimensions, cohort export to CSV, trend-alert hooks) layers onto `analysis/` without touching the live pipeline.
 
 ## Historical Analytics Substrate
 
@@ -749,45 +788,45 @@ Every finalised session writes one JSON file to `$XDG_STATE_HOME/codevigil/sessi
 
 ```json
 {
-    "schema_version": 1,
-    "session_id": "agent-abc123",
-    "project_hash": "abc12345",
-    "project_name": null,
-    "model": null,
-    "permission_mode": null,
-    "started_at": "2026-04-14T10:00:00+00:00",
-    "ended_at": "2026-04-14T10:30:00+00:00",
-    "duration_seconds": 1800.0,
-    "event_count": 120,
-    "parse_confidence": 0.98,
-    "metrics": {
-        "read_edit_ratio": 5.2,
-        "stop_phrase": 0.0,
-        "reasoning_loop": 8.3
-    },
-    "eviction_churn": 0,
-    "cohort_size": 3
+  "schema_version": 1,
+  "session_id": "agent-abc123",
+  "project_hash": "abc12345",
+  "project_name": null,
+  "model": null,
+  "permission_mode": null,
+  "started_at": "2026-04-14T10:00:00+00:00",
+  "ended_at": "2026-04-14T10:30:00+00:00",
+  "duration_seconds": 1800.0,
+  "event_count": 120,
+  "parse_confidence": 0.98,
+  "metrics": {
+    "read_edit_ratio": 5.2,
+    "stop_phrase": 0.0,
+    "reasoning_loop": 8.3
+  },
+  "eviction_churn": 0,
+  "cohort_size": 3
 }
 ```
 
 Field semantics:
 
-| Field | Type | Notes |
-|---|---|---|
-| `schema_version` | `int` | Always present. Starts at 1. Increment on any schema change. |
-| `session_id` | `str` | The JSONL file stem, stable within a session's lifetime. |
-| `project_hash` | `str` | Parent directory name under `~/.claude/projects`. Non-empty; falls back to a 16-hex SHA-256 prefix of the raw path for unrecognised layouts. |
-| `project_name` | `str \| null` | Human-readable name resolved via `ProjectRegistry`; `null` when unresolved. |
-| `model` | `str \| null` | Model identifier from session metadata. `null` until Phase 5 wires this field. Cohort group-by on `model` silently excludes null records. |
-| `permission_mode` | `str \| null` | Permission mode from session metadata. Same exclusion policy as `model`. |
-| `started_at` | ISO 8601 `str` | Wall-clock timestamp of the first observed event. Timezone-aware. |
-| `ended_at` | ISO 8601 `str` | Wall-clock timestamp of the last observed event before eviction. |
-| `duration_seconds` | `float` | `(ended_at - started_at).total_seconds()`. May be `0.0` for single-event sessions. |
-| `event_count` | `int` | Total events processed by the aggregator for this session. |
-| `parse_confidence` | `float` | `0.0`–`1.0` from `SessionParser.stats.parse_confidence` at eviction time. |
-| `metrics` | `dict[str, float]` | Metric name → scalar value from `MetricSnapshot.value` at eviction time. One entry per active collector. |
-| `eviction_churn` | `int` | Number of sessions evicted during the tick that evicted this session. Fleet-level observability; not used by the cohort reducer. |
-| `cohort_size` | `int` | Number of live sessions at the end of the tick that evicted this session. |
+| Field              | Type               | Notes                                                                                                                                        |
+| ------------------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `schema_version`   | `int`              | Always present. Starts at 1. Increment on any schema change.                                                                                 |
+| `session_id`       | `str`              | The JSONL file stem, stable within a session's lifetime.                                                                                     |
+| `project_hash`     | `str`              | Parent directory name under `~/.claude/projects`. Non-empty; falls back to a 16-hex SHA-256 prefix of the raw path for unrecognised layouts. |
+| `project_name`     | `str \| null`      | Human-readable name resolved via `ProjectRegistry`; `null` when unresolved.                                                                  |
+| `model`            | `str \| null`      | Model identifier from session metadata. `null` until Phase 5 wires this field. Cohort group-by on `model` silently excludes null records.    |
+| `permission_mode`  | `str \| null`      | Permission mode from session metadata. Same exclusion policy as `model`.                                                                     |
+| `started_at`       | ISO 8601 `str`     | Wall-clock timestamp of the first observed event. Timezone-aware.                                                                            |
+| `ended_at`         | ISO 8601 `str`     | Wall-clock timestamp of the last observed event before eviction.                                                                             |
+| `duration_seconds` | `float`            | `(ended_at - started_at).total_seconds()`. May be `0.0` for single-event sessions.                                                           |
+| `event_count`      | `int`              | Total events processed by the aggregator for this session.                                                                                   |
+| `parse_confidence` | `float`            | `0.0`–`1.0` from `SessionParser.stats.parse_confidence` at eviction time.                                                                    |
+| `metrics`          | `dict[str, float]` | Metric name → scalar value from `MetricSnapshot.value` at eviction time. One entry per active collector.                                     |
+| `eviction_churn`   | `int`              | Number of sessions evicted during the tick that evicted this session. Fleet-level observability; not used by the cohort reducer.             |
+| `cohort_size`      | `int`              | Number of live sessions at the end of the tick that evicted this session.                                                                    |
 
 ### Schema Migration Policy
 
@@ -819,13 +858,13 @@ This notice fires once per process, on the first successful write, regardless of
 
 The cohort reducer in `analysis/cohort.py` supports exactly five group-by dimensions. This set is deliberately closed — new dimensions are added only when a future phase's feature explicitly needs them:
 
-| Dimension | Key extracted |
-|---|---|
-| `day` | `started_at.date().isoformat()` → `YYYY-MM-DD` |
-| `week` | ISO 8601 week → `YYYY-Www` (Monday-anchored) |
-| `project` | `project_hash` |
-| `model` | `model` (null records excluded) |
-| `permission_mode` | `permission_mode` (null records excluded) |
+| Dimension         | Key extracted                                  |
+| ----------------- | ---------------------------------------------- |
+| `day`             | `started_at.date().isoformat()` → `YYYY-MM-DD` |
+| `week`            | ISO 8601 week → `YYYY-Www` (Monday-anchored)   |
+| `project`         | `project_hash`                                 |
+| `model`           | `model` (null records excluded)                |
+| `permission_mode` | `permission_mode` (null records excluded)      |
 
 ### Sample-Size Guard
 
@@ -841,21 +880,23 @@ When either period has fewer than 2 observations for a given metric, the t-test 
 
 ## Dependency Policy
 
-### v0.1: Zero External Dependencies
+### Runtime dependency: `rich>=13`
 
-stdlib only. No click, no rich, no watchdog, no tomllib backport (Python 3.11+ has `tomllib`). Terminal colors via ANSI escape codes. File watching via `os.stat()` polling.
+One declared runtime dependency: `rich>=13`. It provides the terminal dashboard (`watch`), all history command rendering, and ANSI styling throughout. No click, no watchdog, no tomllib backport (Python 3.11+ has `tomllib`). File watching via `os.stat()` polling.
+
+`rich` brings its own minimal transitive tree (markdown-it-py, mdurl, pygments). The installed footprint is approximately 2–3 MB.
 
 Minimum Python version: **3.11** (for `tomllib`, `StrEnum`, `slots=True` on dataclasses).
 
-### When to Add Dependencies
+`watchdog` (inotify/fsevents) remains a potential future addition for lower-latency file watching, but is not yet included.
+
+### When to add a new dependency
 
 A dependency is justified when:
 
 1. It replaces >200 lines of hand-rolled code, AND
 2. It's well-maintained (>1K stars, recent commits), AND
 3. It has zero transitive dependencies (or all transitive deps are also justified)
-
-Likely first additions: `rich` (terminal rendering), `watchdog` (filesystem events). Neither before v0.2.
 
 ## Testing Strategy
 
@@ -905,7 +946,7 @@ Once we have real users, capture session files that exhibited known quality issu
 pip install codevigil
 ```
 
-Published to PyPI. Single package, no extras. `codevigil` console script entry point.
+Published to PyPI. `codevigil` console script entry point. Runtime dependency: `rich>=13`. See **Dependency Policy** for rationale.
 
 ### Repo
 

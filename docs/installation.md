@@ -1,6 +1,6 @@
 # Installation
 
-codevigil ships as a single Python package with **zero runtime dependencies**. Any installer that can resolve a wheel from PyPI works. Python 3.11 or 3.12 is required.
+codevigil ships as a single Python package. The only runtime dependency is `rich>=13`, which provides the terminal dashboard and all history command formatting. Any installer that can resolve a wheel from PyPI works. Python 3.11 or 3.12 is required.
 
 ## Recommended: `uv tool`
 
@@ -79,32 +79,16 @@ pip install .
 
 For a full development environment with the lint, type-check, and test toolchain, use `uv sync --dev` instead — see the [Contributing](#contributing) section below.
 
-## Optional extras
-
-### `[rich]` — enhanced terminal output for `history` commands
-
-The `history` subcommand family works without any extras (plain Markdown output). Install the `[rich]` extra to enable colored panels and formatted tables in `history <SESSION_ID>` and `history heatmap`:
-
-```bash
-uv tool install 'codevigil[rich]'
-# or, if codevigil is already installed:
-uv add 'codevigil[rich]'
-```
-
-`rich>=13` brings its own minimal dependency tree (markdown-it-py, mdurl, pygments). The approximate installed size is around 2–3 MB on disk. The exact figure depends on the platform and whether pygments is already present in the environment.
-
-Without `[rich]`, `history list`, `history <SESSION_ID>`, and `history diff` all work normally and produce Markdown output. `history heatmap` exits 2 with an install hint when `rich` is absent.
-
 ## Verifying the install is genuine
 
-codevigil ships with no runtime dependencies, so the wheel install is exactly two files plus a sdist tarball:
+The wheel install is exactly two distribution files plus a sdist tarball:
 
 ```text
 codevigil-0.1.0-py3-none-any.whl
 codevigil-0.1.0.tar.gz
 ```
 
-After installing, you can confirm the package has zero installed dependencies:
+After installing, confirm the package and its single declared dependency:
 
 ```bash
 uv tool list
@@ -112,7 +96,7 @@ uv tool list
 pip show codevigil
 ```
 
-The `Requires` field should be empty. If you see anything listed, you have a different package, not codevigil.
+The `Requires` field should list `rich>=13` and nothing else. If you see additional packages, you have a different package, not codevigil.
 
 ## What gets created on first run
 

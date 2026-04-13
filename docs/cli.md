@@ -15,13 +15,13 @@ These apply to every subcommand and must appear before the subcommand name on th
 
 ## Subcommands
 
-| Subcommand                      | Purpose                                                                    |
-| ------------------------------- | -------------------------------------------------------------------------- |
-| [`config check`](#config-check) | Resolve the effective config and print each value with its source.         |
-| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard.        |
-| [`report`](#report)             | Batch analysis over one or more session files.                             |
-| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                  |
-| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap).|
+| Subcommand                      | Purpose                                                                     |
+| ------------------------------- | --------------------------------------------------------------------------- |
+| [`config check`](#config-check) | Resolve the effective config and print each value with its source.          |
+| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard.         |
+| [`report`](#report)             | Batch analysis over one or more session files.                              |
+| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                   |
+| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap). |
 
 ---
 
@@ -131,14 +131,14 @@ Batch analysis over one or more session files. With no cohort flags, walks the i
 
 ### Flags
 
-| Flag                       | Description                                                             |
-| -------------------------- | ----------------------------------------------------------------------- |
-| `--from YYYY-MM-DD`        | Drop sessions whose first event timestamp is strictly before this date. |
-| `--to YYYY-MM-DD`          | Drop sessions whose first event timestamp is strictly after this date.  |
-| `--format {json,markdown}` | Output format for the per-session report. Default `json`.               |
-| `--output DIR`             | Override the report output directory. Must resolve under `$HOME`.       |
+| Flag                       | Description                                                                     |
+| -------------------------- | ------------------------------------------------------------------------------- |
+| `--from YYYY-MM-DD`        | Drop sessions whose first event timestamp is strictly before this date.         |
+| `--to YYYY-MM-DD`          | Drop sessions whose first event timestamp is strictly after this date.          |
+| `--format {json,markdown}` | Output format for the per-session report. Default `json`.                       |
+| `--output DIR`             | Override the report output directory. Must resolve under `$HOME`.               |
 | `--group-by DIMENSION`     | Produce a cohort trend table. See below. Incompatible with `--compare-periods`. |
-| `--compare-periods RANGES` | Compare two date ranges. See below. Incompatible with `--group-by`.     |
+| `--compare-periods RANGES` | Compare two date ranges. See below. Incompatible with `--group-by`.             |
 
 ### JSON output shape
 
@@ -198,13 +198,13 @@ When `--group-by DIMENSION` is provided, codevigil aggregates all sessions into 
 
 Valid dimensions:
 
-| Dimension       | Groups sessions by                                             |
-| --------------- | -------------------------------------------------------------- |
-| `day`           | Calendar date of the first event (UTC).                        |
-| `week`          | ISO 8601 week (`YYYY-Www`).                                    |
-| `project`       | Project hash derived from the session file path.               |
-| `model`         | Model identifier from session metadata.                        |
-| `permission_mode` | Permission mode from session metadata.                       |
+| Dimension         | Groups sessions by                               |
+| ----------------- | ------------------------------------------------ |
+| `day`             | Calendar date of the first event (UTC).          |
+| `week`            | ISO 8601 week (`YYYY-Www`).                      |
+| `project`         | Project hash derived from the session file path. |
+| `model`           | Model identifier from session metadata.          |
+| `permission_mode` | Permission mode from session metadata.           |
 
 Each cell in the trend table shows `mean ± stdev (n)`. Cells with fewer than 5 observations are replaced with the sentinel `n<5` and are not used in any headline reporting.
 
@@ -213,8 +213,8 @@ Output shape:
 ```markdown
 # Cohort Trend Report — by week
 
-| week    | Parse Health       | Read:Edit Ratio    | Write Precision    |
-| ---     | ---                | ---                | ---                |
+| week     | Parse Health       | Read:Edit Ratio    | Write Precision    |
+| -------- | ------------------ | ------------------ | ------------------ |
 | 2026-W14 | 0.99 ± 0.01 (n=10) | 4.20 ± 1.31 (n=10) | 0.43 ± 0.12 (n=10) |
 | 2026-W15 | 0.98 ± 0.02 (n=15) | 3.80 ± 0.98 (n=15) | 0.51 ± 0.09 (n=15) |
 
@@ -225,9 +225,11 @@ Output shape:
 ## Appendix
 
 ### Behavioral Catalog
+
 ...
 
 ### Threshold Table
+
 ...
 ```
 
@@ -247,7 +249,7 @@ Output shape:
 Sessions in period A: 10 — Sessions in period B: 10
 
 | Metric          | Period A mean | Period B mean | Delta | Delta% | Significant |
-| ---             | ---           | ---           | ---   | ---    | ---         |
+| --------------- | ------------- | ------------- | ----- | ------ | ----------- |
 | read_edit_ratio | 4.20 (n=10)   | 3.80 (n=10)   | -0.40 | -9.5%  | no          |
 
 ## Summary
@@ -378,29 +380,29 @@ Retrospective, post-mortem view of stored session reports from the `SessionStore
 
 ### `history list`
 
-Lists all stored sessions in a compact Markdown table. Reads all sessions from the store in a single pass — no per-row disk reads after the initial enumeration.
+Lists all stored sessions in a rich formatted table. Reads all sessions from the store in a single pass — no per-row disk reads after the initial enumeration.
 
 **Columns:** `session_id` (short, 12-char), `project`, `started_at`, `duration`, `severity`, `model`, `permission_mode`, `metrics_summary` (top-2 metrics by absolute value).
 
 **Flags:**
 
-| Flag | Description |
-| ---- | ----------- |
-| `--project NAME` | Filter by project name or project hash. |
-| `--since YYYY-MM-DD` | Include sessions whose `started_at` is on or after this date (inclusive). |
-| `--until YYYY-MM-DD` | Include sessions whose `started_at` is on or before this date (inclusive). |
-| `--severity {ok,warn,crit}` | Filter by worst-metric severity across all metrics in the session. |
-| `--model MODEL` | Filter by model identifier (exact match). |
-| `--permission-mode MODE` | Filter by permission mode (exact match). |
+| Flag                        | Description                                                                |
+| --------------------------- | -------------------------------------------------------------------------- |
+| `--project NAME`            | Filter by project name or project hash.                                    |
+| `--since YYYY-MM-DD`        | Include sessions whose `started_at` is on or after this date (inclusive).  |
+| `--until YYYY-MM-DD`        | Include sessions whose `started_at` is on or before this date (inclusive). |
+| `--severity {ok,warn,crit}` | Filter by worst-metric severity across all metrics in the session.         |
+| `--model MODEL`             | Filter by model identifier (exact match).                                  |
+| `--permission-mode MODE`    | Filter by permission mode (exact match).                                   |
 
 **Severity classification** maps metric values to labels using the same thresholds as the watch-mode collectors:
 
-| Metric | Warn threshold | Crit threshold | Scale |
-| ------ | -------------- | -------------- | ----- |
-| `read_edit_ratio` | < 4.0 | < 2.0 | inverted (lower is worse) |
-| `stop_phrase` | >= 1.0 | >= 3.0 | normal (higher is worse) |
-| `reasoning_loop` | >= 10.0 | >= 20.0 | normal |
-| `parse_health` | < 0.9 | < 0.9 | inverted |
+| Metric            | Warn threshold | Crit threshold | Scale                     |
+| ----------------- | -------------- | -------------- | ------------------------- |
+| `read_edit_ratio` | < 4.0          | < 2.0          | inverted (lower is worse) |
+| `stop_phrase`     | >= 1.0         | >= 3.0         | normal (higher is worse)  |
+| `reasoning_loop`  | >= 10.0        | >= 20.0        | normal                    |
+| `parse_health`    | < 0.9          | < 0.9          | inverted                  |
 
 **Examples:**
 
@@ -425,7 +427,7 @@ codevigil history list --model gpt-4.1
 
 ### `history <SESSION_ID>`
 
-Renders a single stored session in detail. With `rich` installed the output uses `rich.panel.Panel` and `rich.table.Table` for visual layout. Without `rich`, the output is plain Markdown.
+Renders a single stored session in detail using `rich.panel.Panel` and `rich.table.Table` for visual layout.
 
 **Output sections:**
 
@@ -446,7 +448,7 @@ codevigil history agent-abc123def456ghi
 
 ### `history diff <SESSION_A> <SESSION_B>`
 
-Renders a side-by-side Markdown comparison of two sessions. Aligns metric name sequences using `difflib.SequenceMatcher` (LCS). Output is deterministic. This subcommand does not require the `rich` extra.
+Renders a side-by-side comparison of two sessions using rich formatted tables. Aligns metric name sequences using `difflib.SequenceMatcher` (LCS). Output is deterministic.
 
 **Output sections:**
 
@@ -467,25 +469,18 @@ codevigil history diff agent-abc123 agent-def456
 
 ### `history heatmap <SESSION_ID>`
 
-Renders a metric x severity matrix for a single session using `rich.table.Table`. Each row is one metric; columns are `ok`, `warn`, and `crit`; the cell in the session's actual severity bucket shows the metric value, other cells show `—`.
-
-Requires the `rich` optional extra. Without it, prints an install hint and exits 2.
+Renders a metric × severity matrix for a single session using `rich.table.Table`. Each row is one metric; columns are `ok`, `warn`, and `crit`; the cell in the session's actual severity bucket shows the metric value, other cells show `—`.
 
 **Examples:**
 
 ```bash
-# With rich installed
 codevigil history heatmap agent-abc123
-
-# Install rich if needed
-uv add 'codevigil[rich]'
 ```
 
 **Exit codes:**
 
 - `0` — success
 - `1` — session id not found in the store
-- `2` — `rich` extra not installed
 
 ---
 
