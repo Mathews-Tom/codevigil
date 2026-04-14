@@ -171,6 +171,16 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 
 
+def _run_config_check(args: argparse.Namespace) -> int:
+    try:
+        resolved = load_config(config_path=args.config)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
+        return 2 if err.level is ErrorLevel.CRITICAL else 1
+    sys.stdout.write(render_config_check(resolved))
+    return 0
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = _build_parser()
     args = parser.parse_args(argv)
@@ -181,13 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "config":
         if args.config_command == "check":
-            try:
-                resolved = load_config(config_path=args.config)
-            except ConfigError as err:
-                sys.stderr.write(_format_error(err))
-                return 2 if err.level is ErrorLevel.CRITICAL else 1
-            sys.stdout.write(render_config_check(resolved))
-            return 0
+            return _run_config_check(args)
         parser.error(f"unknown config subcommand {args.config_command!r}")
 
     if args.command == "watch":
@@ -432,13 +436,31 @@ class _SessionReport:
     metrics: list[MetricSnapshot]
 
 
+def _emit_single_period_report(
+    session_reports: list[_SessionReport],
+    output_dir: Path,
+    *,
+    fmt: str,
+    explain: bool,
+) -> None:
+    """Render and write a single-period report in json or markdown format."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        payload = _render_report_json(session_reports, explain=explain)
+        _write_report(output_dir / "report.json", payload)
+    else:
+        payload = _render_report_markdown(session_reports, explain=explain)
+        _write_report(output_dir / "report.md", payload)
+    sys.stdout.write(payload)
+    sys.stdout.flush()
+
+
 def _run_report(args: argparse.Namespace) -> int:
     try:
         resolved = load_config(config_path=args.config)
     except ConfigError as err:
         sys.stderr.write(_format_error(err))
         return 2 if err.level is ErrorLevel.CRITICAL else 1
-
     cfg = resolved.values
 
     # Mutual exclusivity check for the two new flags.
@@ -459,9 +481,7 @@ def _run_report(args: argparse.Namespace) -> int:
     # Multi-period default path: when neither --from nor --to is supplied,
     # compute today / 7d / 30d windows relative to now(UTC) and render three
     # stacked rich panels. Explicit flags fall through to the single-period path.
-    from_date_raw: str | None = args.from_date
-    to_date_raw: str | None = args.to_date
-    if from_date_raw is None and to_date_raw is None:
+    if args.from_date is None and args.to_date is None:
         return _run_report_multi_period(args, cfg=cfg)
 
     # Original per-session report path (unchanged when either flag is passed).
@@ -480,9 +500,8 @@ def _run_report(args: argparse.Namespace) -> int:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
 
-    files = list(_expand_path_argument(args.path))
+    files = sorted(_expand_path_argument(args.path), key=lambda p: str(p))
     files = _filter_by_date(files, from_dt=from_dt, to_dt=to_dt)
-    files.sort(key=lambda p: str(p))
 
     session_reports: list[_SessionReport] = []
     exit_code = 0
@@ -492,17 +511,12 @@ def _run_report(args: argparse.Namespace) -> int:
         if report.parse_confidence < 0.9:
             exit_code = 2
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    explain = bool(args.explain)
-    if args.format == "json":
-        payload = _render_report_json(session_reports, explain=explain)
-        _write_report(output_dir / "report.json", payload)
-        sys.stdout.write(payload)
-    else:
-        payload = _render_report_markdown(session_reports, explain=explain)
-        _write_report(output_dir / "report.md", payload)
-        sys.stdout.write(payload)
-    sys.stdout.flush()
+    _emit_single_period_report(
+        session_reports,
+        output_dir,
+        fmt=args.format,
+        explain=bool(args.explain),
+    )
     return exit_code
 
 
