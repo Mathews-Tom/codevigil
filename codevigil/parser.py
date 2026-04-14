@@ -852,19 +852,37 @@ class SessionParser:
             return
 
         # Sub-shape 2: flat text / tool+tool_input keys (pre-v1 flat-content).
-        text = parsed.get("text")
-        if isinstance(text, str):
+        # Reject lines that carry none of the recognised flat keys — they are
+        # genuinely malformed (e.g. assistant lines with arbitrary unknown
+        # top-level fields), not a known historical shape, and must not be
+        # silently counted as parsed.
+        has_text = isinstance(parsed.get("text"), str)
+        has_tool = isinstance(parsed.get("tool"), str)
+        if not has_text and not has_tool:
+            self._stats.record_missing("message")
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.PARSER,
+                    code="parser.missing_message",
+                    message="assistant line missing 'message' object",
+                    context={"session_id": session_id},
+                )
+            )
+            return
+
+        if has_text:
             emitted += 1
             yield Event(
                 timestamp=timestamp,
                 session_id=session_id,
                 kind=EventKind.ASSISTANT_MESSAGE,
-                payload={"text": text},
+                payload={"text": parsed["text"]},
             )
 
-        tool_name_raw = parsed.get("tool")
-        tool_input = parsed.get("tool_input")
-        if isinstance(tool_name_raw, str):
+        if has_tool:
+            tool_name_raw: str = parsed["tool"]
+            tool_input = parsed.get("tool_input")
             if not isinstance(tool_input, dict):
                 tool_input = {}
             canonical = canonicalise_tool_name(tool_name_raw)
@@ -886,10 +904,7 @@ class SessionParser:
                 payload=payload,
             )
 
-        if emitted == 0:
-            self._stats.parsed_events += 1
-        else:
-            self._stats.parsed_events += emitted
+        self._stats.parsed_events += emitted
 
     def _emit_flat_content_user(
         self,
@@ -943,18 +958,34 @@ class SessionParser:
             return
 
         # Sub-shape 2: flat text / tool_result keys (pre-v1 flat-content).
-        text = parsed.get("text")
-        if isinstance(text, str):
+        # Reject lines that carry none of the recognised flat keys — they are
+        # genuinely malformed, not a known historical shape.
+        has_text = isinstance(parsed.get("text"), str)
+        has_tool_result = parsed.get("tool_result") is not None
+        if not has_text and not has_tool_result:
+            self._stats.record_missing("message")
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.PARSER,
+                    code="parser.missing_message",
+                    message="user line missing 'message' object",
+                    context={"session_id": session_id},
+                )
+            )
+            return
+
+        if has_text:
             emitted += 1
             yield Event(
                 timestamp=timestamp,
                 session_id=session_id,
                 kind=EventKind.USER_MESSAGE,
-                payload={"text": text},
+                payload={"text": parsed["text"]},
             )
 
-        tool_result = parsed.get("tool_result")
-        if tool_result is not None:
+        if has_tool_result:
+            tool_result = parsed["tool_result"]
             output = tool_result if isinstance(tool_result, str) else str(tool_result)
             emitted += 1
             yield Event(
@@ -968,10 +999,7 @@ class SessionParser:
                 },
             )
 
-        if emitted == 0:
-            self._stats.parsed_events += 1
-        else:
-            self._stats.parsed_events += emitted
+        self._stats.parsed_events += emitted
 
     def _emit_system(
         self,
