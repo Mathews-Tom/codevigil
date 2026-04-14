@@ -14,6 +14,8 @@ Start here. The repository [README](../README.md) is the front-door pitch and qu
 
 **I want to know what each metric measures and how to interpret WARN / CRITICAL signals.** → [collectors.md](collectors.md)
 
+**I want to know what the experimental task classifier is and how to turn it off.** → [classifier.md](classifier.md)
+
 **I'm evaluating codevigil for security and want to know what the privacy guarantees actually are.** → [privacy.md](privacy.md)
 
 **I want to understand the architecture and the plugin boundaries.** → [design.md](design.md)
@@ -28,7 +30,7 @@ The docs follow the [Diátaxis framework](https://diataxis.fr/) — four distinc
 | ----------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
 | Tutorial    | [getting-started.md](getting-started.md)                                               | Walks you through your first run end to end. Read once.                     |
 | How-to      | [README quickstart](../README.md#first-run), [installation.md](installation.md)        | Recipes for specific outcomes. Read when you need them.                     |
-| Reference   | [cli.md](cli.md), [configuration.md](configuration.md), [collectors.md](collectors.md) | Lookup material. Skim, then return when you need a specific fact.           |
+| Reference   | [cli.md](cli.md), [configuration.md](configuration.md), [collectors.md](collectors.md), [classifier.md](classifier.md) | Lookup material. Skim, then return when you need a specific fact.           |
 | Explanation | [privacy.md](privacy.md), [design.md](design.md)                                       | Why codevigil is the way it is. Read when you want to understand decisions. |
 
 ## Conventions across the docs

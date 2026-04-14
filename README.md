@@ -4,7 +4,7 @@ Local, privacy-preserving observability for Claude Code sessions.
 
 codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics about reasoning and tool-use patterns, and surfaces them in a rich terminal dashboard or as JSON / markdown reports. **Zero network egress, no data ever leaves your machine.**
 
-Status: alpha. Python 3.11 and 3.12.
+Status: beta (0.2.0). Python 3.11 and 3.12.
 
 ## Install
 
@@ -47,18 +47,21 @@ session: a3f7c2d | project: my-project | 2m 34s ACTIVE
 
 ```bash
 codevigil config check                    # show the resolved config and where each value came from
-codevigil report ~/.claude/projects       # batch report over a tree of session files
-codevigil report sessions/ --format markdown --from 2026-04-01
+codevigil report ~/.claude/projects       # default: stacked today / 7d / 30d panels
+codevigil report sessions/ --format markdown --from 2026-04-01  # explicit window → single-period mode
 codevigil report ~/.claude/projects --group-by week          # cohort trend table by ISO week
 codevigil report sessions/ --compare-periods 2026-03-01:2026-03-31,2026-04-01:2026-04-30
 codevigil export session.jsonl            # NDJSON event stream on stdout, jq-friendly
 codevigil export session.jsonl | jq 'select(.kind == "tool_call") | .payload.tool_name'
 codevigil history list                    # list stored sessions
-codevigil history list --project my-project --since 2026-04-01 --severity warn
-codevigil history SESSION_ID              # event and metric timeline for one session
+codevigil history list --task-type debug_loop --since 2026-04-01 --severity warn
+codevigil history SESSION_ID              # event, metric, and per-turn task-type timeline
 codevigil history diff SESSION_A SESSION_B   # side-by-side Markdown diff of two sessions
-codevigil history heatmap SESSION_ID      # tool × severity heatmap
+codevigil history heatmap SESSION_ID      # tool × severity heatmap with proportional gradient bars
+codevigil history heatmap --axis task_type  # cross-tab metrics against experimental task labels
 ```
+
+`codevigil report` with no date flags now renders three stacked windows — **today**, **7d**, and **30d** — in one invocation. Pass `--from` or `--to` to fall back to the original single-period mode. Scripts that depend on the old no-flag single-period output should pass `--from 1970-01-01` (or any open lower bound) to preserve the previous shape.
 
 Full flag reference for every subcommand: [docs/cli.md](docs/cli.md).
 
@@ -92,6 +95,24 @@ Three user-facing collectors plus an always-on integrity gate:
 
 Threshold semantics, what each metric is sensitive to, and how to interpret CRITICAL signals: [docs/collectors.md](docs/collectors.md).
 
+## Task classifier `[experimental]`
+
+0.2.0 adds a turn-level task classifier that labels each Claude Code turn as `exploration`, `mutation_heavy`, `debug_loop`, `planning`, or `mixed` using a two-stage cascade (tool-presence heuristic → keyword regex on the user message, stdlib `re` only, zero network, zero new dependencies). Session-level labels aggregate turn labels by majority vote. Labels surface in four places:
+
+- **`history list`** — new `task_type` column and `--task-type <label>` filter
+- **`history heatmap --axis task_type`** — cross-tab metrics against task labels
+- **`history SESSION_ID`** — per-turn task-type headings in the event timeline
+- **`codevigil watch`** — right-aligned task tag in each session header
+
+Every surface is marked `[experimental]`. The classifier is opt-out via `[classifier]` in `~/.config/codevigil/config.toml`:
+
+```toml
+[classifier]
+enabled = false
+```
+
+When disabled, the four surfaces degrade cleanly: no task column in list, no task tag in watch, no per-turn headings in detail, and `history heatmap --axis task_type` exits with a clear error. Category definitions, the cascade algorithm, and the calibration gate (≥85% agreement on a labeled corpus) are documented in [docs/classifier.md](docs/classifier.md).
+
 ## Privacy
 
 Three independent enforcement layers ensure session data never leaves your machine:
@@ -104,20 +125,21 @@ The full privacy model and threat boundary: [docs/privacy.md](docs/privacy.md).
 
 ## Documentation
 
-| Doc                                                | What it covers                                      |
-| -------------------------------------------------- | --------------------------------------------------- |
-| [docs/installation.md](docs/installation.md)       | Install, upgrade, uninstall, from-source builds     |
-| [docs/getting-started.md](docs/getting-started.md) | First-run walkthrough and interpreting the output   |
-| [docs/cli.md](docs/cli.md)                         | Exhaustive CLI reference: every subcommand and flag |
-| [docs/configuration.md](docs/configuration.md)     | Every config key, env binding, and validation rule  |
-| [docs/collectors.md](docs/collectors.md)           | What each metric measures and how to interpret it   |
-| [docs/privacy.md](docs/privacy.md)                 | Privacy guarantees and the threat model             |
-| [docs/design.md](docs/design.md)                   | Architecture, plugin boundaries, error taxonomy     |
-| [CHANGELOG.md](CHANGELOG.md)                       | Release notes                                       |
+| Doc                                                | What it covers                                        |
+| -------------------------------------------------- | ----------------------------------------------------- |
+| [docs/installation.md](docs/installation.md)       | Install, upgrade, uninstall, from-source builds       |
+| [docs/getting-started.md](docs/getting-started.md) | First-run walkthrough and interpreting the output     |
+| [docs/cli.md](docs/cli.md)                         | Exhaustive CLI reference: every subcommand and flag   |
+| [docs/configuration.md](docs/configuration.md)     | Every config key, env binding, and validation rule    |
+| [docs/collectors.md](docs/collectors.md)           | What each metric measures and how to interpret it     |
+| [docs/classifier.md](docs/classifier.md)           | Experimental task classifier: categories and surfaces |
+| [docs/privacy.md](docs/privacy.md)                 | Privacy guarantees and the threat model               |
+| [docs/design.md](docs/design.md)                   | Architecture, plugin boundaries, error taxonomy       |
+| [CHANGELOG.md](CHANGELOG.md)                       | Release notes                                         |
 
 ## Experimental thresholds
 
-The default v0.1 thresholds were derived from a single user's session window — one user is not a population baseline. Every default ships with `experimental = true` and the watch header shows `[experimental thresholds]` until you either flip the flag in config or let bootstrap mode personalise the thresholds for your own workflow.
+The shipped default thresholds were derived from a single user's session window — one user is not a population baseline. Every default ships with `experimental = true` and the watch header shows `[experimental thresholds]` until you either flip the flag in config or let bootstrap mode personalise the thresholds for your own workflow.
 
 Bootstrap mode observes the first 10 sessions (configurable) with all severities pinned to `OK`, records the per-collector value distributions, then derives WARN at p80 and CRITICAL at p95 of _your_ local data, clamped by the literal-value hard caps. No manual tuning required. See [docs/collectors.md#experimental-thresholds-and-bootstrap](docs/collectors.md#experimental-thresholds-and-bootstrap).
 
