@@ -1,0 +1,333 @@
+{
+  "captured_at": "2026-04-14T08:08:03.579568+00:00",
+  "fixture_count": 15,
+  "report_count": 15,
+  "reports": {
+    "clean": {
+      "cohort_size": 0,
+      "duration_seconds": 19.0,
+      "ended_at": "2026-02-01T10:00:19+00:00",
+      "event_count": 22,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 1.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "clean",
+      "started_at": "2026-02-01T10:00:00+00:00"
+    },
+    "cross_file_a": {
+      "cohort_size": 0,
+      "duration_seconds": 16.0,
+      "ended_at": "2026-02-01T12:00:16+00:00",
+      "event_count": 18,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.6666666666666666,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "cross_file_a",
+      "started_at": "2026-02-01T12:00:00+00:00"
+    },
+    "cross_file_b": {
+      "cohort_size": 0,
+      "duration_seconds": 4.0,
+      "ended_at": "2026-02-01T12:00:20+00:00",
+      "event_count": 12,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "cross_file_b",
+      "started_at": "2026-02-01T12:00:16+00:00"
+    },
+    "intra_file_duplicates": {
+      "cohort_size": 0,
+      "duration_seconds": 5.0,
+      "ended_at": "2026-02-01T11:00:05+00:00",
+      "event_count": 20,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 1.5,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "intra_file_duplicates",
+      "started_at": "2026-02-01T11:00:00+00:00"
+    },
+    "session_debug_loop_01": {
+      "cohort_size": 0,
+      "duration_seconds": 20.0,
+      "ended_at": "2026-02-12T09:00:20+00:00",
+      "event_count": 22,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 1.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_debug_loop_01",
+      "started_at": "2026-02-12T09:00:00+00:00"
+    },
+    "session_debug_loop_02": {
+      "cohort_size": 0,
+      "duration_seconds": 17.0,
+      "ended_at": "2026-02-12T10:00:17+00:00",
+      "event_count": 19,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 1.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_debug_loop_02",
+      "started_at": "2026-02-12T10:00:00+00:00"
+    },
+    "session_exploration_01": {
+      "cohort_size": 0,
+      "duration_seconds": 18.0,
+      "ended_at": "2026-02-10T09:00:18+00:00",
+      "event_count": 20,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 3.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_exploration_01",
+      "started_at": "2026-02-10T09:00:00+00:00"
+    },
+    "session_exploration_02": {
+      "cohort_size": 0,
+      "duration_seconds": 15.0,
+      "ended_at": "2026-02-10T10:00:15+00:00",
+      "event_count": 17,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 3.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_exploration_02",
+      "started_at": "2026-02-10T10:00:00+00:00"
+    },
+    "session_mixed_01": {
+      "cohort_size": 0,
+      "duration_seconds": 17.0,
+      "ended_at": "2026-02-14T09:00:17+00:00",
+      "event_count": 19,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.5,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_mixed_01",
+      "started_at": "2026-02-14T09:00:00+00:00"
+    },
+    "session_mixed_02": {
+      "cohort_size": 0,
+      "duration_seconds": 13.0,
+      "ended_at": "2026-02-14T10:00:13+00:00",
+      "event_count": 15,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.5,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.5
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_mixed_02",
+      "started_at": "2026-02-14T10:00:00+00:00"
+    },
+    "session_mutation_heavy_01": {
+      "cohort_size": 0,
+      "duration_seconds": 20.0,
+      "ended_at": "2026-02-11T09:00:20+00:00",
+      "event_count": 22,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.14285714285714285
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_mutation_heavy_01",
+      "started_at": "2026-02-11T09:00:00+00:00"
+    },
+    "session_mutation_heavy_02": {
+      "cohort_size": 0,
+      "duration_seconds": 20.0,
+      "ended_at": "2026-02-11T10:00:20+00:00",
+      "event_count": 22,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.14285714285714285,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.14285714285714285
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_mutation_heavy_02",
+      "started_at": "2026-02-11T10:00:00+00:00"
+    },
+    "session_planning_01": {
+      "cohort_size": 0,
+      "duration_seconds": 13.0,
+      "ended_at": "2026-02-13T09:00:13+00:00",
+      "event_count": 15,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 2.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_planning_01",
+      "started_at": "2026-02-13T09:00:00+00:00"
+    },
+    "session_planning_02": {
+      "cohort_size": 0,
+      "duration_seconds": 9.0,
+      "ended_at": "2026-02-13T10:00:09+00:00",
+      "event_count": 11,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 1.0,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "session_planning_02",
+      "started_at": "2026-02-13T10:00:00+00:00"
+    },
+    "straddle": {
+      "cohort_size": 0,
+      "duration_seconds": 1200.0,
+      "ended_at": "2026-01-02T00:10:00+00:00",
+      "event_count": 25,
+      "eviction_churn": 0,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 0.5,
+        "reasoning_loop": 0.0,
+        "stop_phrase": 0.0,
+        "write_precision": 0.5
+      },
+      "model": null,
+      "parse_confidence": 1.0,
+      "permission_mode": null,
+      "project_hash": "unknown",
+      "project_name": null,
+      "schema_version": 1,
+      "session_id": "straddle",
+      "started_at": "2026-01-01T23:50:00+00:00"
+    }
+  }
+}
