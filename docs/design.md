@@ -516,7 +516,19 @@ The aggregator maintains a `TurnGrouper` inside each `_SessionContext` as a side
 
 Completed turns are accumulated in `_SessionContext.completed_turns` as immutable `Turn` dataclass instances. Each `Turn` records the session ID, start/end timestamps, the user message text, the ordered sequence of canonical tool names called within the turn, and the total event count. A `task_type: str | None` field is reserved for the Phase 5 classifier; it is always `None` until classification runs.
 
-Collectors continue to receive raw `Event` objects — they do not consume `Turn`. The Turn sidecar is exposed only to the classifier (Phase 5) and to future `history detail` turn-level display (Phase 6). At session eviction the completed turn list is serialised into `SessionReport.turns` (an optional field, `None` for pre-Phase-4 records) alongside the existing collector metrics.
+Collectors continue to receive raw `Event` objects — they do not consume `Turn`. The Turn sidecar is exposed only to the classifier and to `history detail` turn-level display. At session eviction the completed turn list is serialised into `SessionReport.turns` (an optional field, `None` for pre-v0.2.0 records) alongside the existing collector metrics.
+
+### Classifier Layering
+
+The task classifier (`codevigil/classifier.py`) is a pure function of completed `Turn` snapshots. It runs inside the aggregator, invoked by `_SessionContext` immediately after `TurnGrouper` closes a turn (on arrival of the next user message or at eviction). The classifier is never called from the parser.
+
+**Layer assignment rationale.** The parser is a line-level processor with no notion of turn boundaries — a turn spans multiple events across potentially multiple JSONL lines and files. Threading turn-boundary logic into the parser would require it to maintain conversational state, violating its single responsibility: event extraction and deduplication. The aggregator already accumulates events into `_SessionContext` objects where temporal ordering is visible and session lifecycle is managed. Placing classification there keeps the parser stateless with respect to conversation structure.
+
+**Two-stage cascade.** Stage 1 applies tool-presence heuristics (mutation count, bash count, read/glob dominance) and is deterministic. Stage 2 applies keyword regex against the user message text and runs only when Stage 1 is ambiguous. A Stage 1 match is never overridden by Stage 2. See [docs/classifier.md](classifier.md) for the full rule table.
+
+**Isolation from collectors.** Collectors (`read_edit_ratio`, `reasoning_loop`, `stop_phrase`, `parse_health`) continue to receive raw `Event` streams and do not consume `task_type`. Task-aware thresholds — e.g., treating a `mutation_heavy` session differently in `read_edit_ratio` — are a future concern, deferred until calibration establishes sufficient trust in the classifier labels. Coupling task-aware thresholds to classifier output before calibration is established would make it impossible to isolate regressions in either subsystem.
+
+**Opt-in surface.** The classifier is controlled by two config keys: `classifier.enabled` (gates all classification; default `true`) and `classifier.experimental` (controls the `[experimental]` badge on all user-facing surfaces; default `true`). When disabled, `classify_turn` is never called and `session_task_type` / `turn_task_types` remain `null` in session reports. All user-visible surfaces (history list column, history detail panel, watch header tag, heatmap axis) degrade cleanly when the classifier is disabled.
 
 ## Configuration
 
