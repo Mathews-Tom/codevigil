@@ -100,6 +100,18 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         # reason. The default of 1 means single-day periods are allowed.
         "min_observation_days": 1,
     },
+    "classifier": {
+        # When true (the default), the turn-level task classifier runs inside
+        # the aggregator at turn-close time. Each Turn receives a task_type
+        # label and SessionReport gains session_task_type and turn_task_types
+        # fields. Set to false to disable classification entirely; all
+        # task_type fields will be None.
+        "enabled": True,
+        # When true (the default), classifier output is considered experimental
+        # and is tagged [experimental] in Phase 6 user-facing surfaces. Flip to
+        # false after the classifier has proven stable on a real-world corpus.
+        "experimental": True,
+    },
 }
 
 # Known collector and renderer names. These are hardcoded for Phase 2 because

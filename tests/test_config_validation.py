@@ -169,3 +169,81 @@ def test_duplicate_collector_name_rejected(tmp_path: Path) -> None:
     with pytest.raises(ConfigError) as exc:
         load_config(config_path=path, env={}, cli_overrides={})
     assert exc.value.code == "config.duplicate_collector"
+
+
+# ---------------------------------------------------------------------------
+# classifier section
+# ---------------------------------------------------------------------------
+
+
+def test_classifier_defaults_are_valid() -> None:
+    """Default config with no classifier section resolves without error."""
+    cfg = load_config(config_path=None, env={}, cli_overrides={})
+    assert cfg.values["classifier"]["enabled"] is True
+    assert cfg.values["classifier"]["experimental"] is True
+
+
+def test_classifier_enabled_false_accepted(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [classifier]
+        enabled = false
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    assert cfg.values["classifier"]["enabled"] is False
+
+
+def test_classifier_experimental_false_accepted(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [classifier]
+        experimental = false
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    assert cfg.values["classifier"]["experimental"] is False
+
+
+def test_classifier_enabled_wrong_type_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [classifier]
+        enabled = "yes"
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.type_mismatch"
+    assert "classifier.enabled" in exc.value.message
+
+
+def test_classifier_experimental_wrong_type_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [classifier]
+        experimental = 1
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.type_mismatch"
+    assert "classifier.experimental" in exc.value.message
+
+
+def test_classifier_unknown_key_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [classifier]
+        unknown_option = true
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.unknown_key"
+    assert "classifier.unknown_option" in exc.value.message
