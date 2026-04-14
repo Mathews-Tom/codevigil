@@ -95,6 +95,17 @@ Starts the live tick loop. Polls `watch.root` at `watch.poll_interval`, parses n
 
 Multi-session terminal dashboard. Most-recently-active sessions appear first. See [getting-started.md](getting-started.md) for a fully annotated example frame.
 
+The dashboard renders at most `watch.display_limit` session blocks per frame (default 20), ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count and reminds you how to raise the limit.
+
+### Relevant config keys
+
+| Key                   | Default | Description |
+| --------------------- | ------- | ----------- |
+| `watch.root`          | `~/.claude/projects` | Directory to watch for session JSONL files. |
+| `watch.poll_interval` | `2.0`   | Seconds between filesystem polls. |
+| `watch.tick_interval` | `1.0`   | Seconds between terminal frames. |
+| `watch.display_limit` | `20`    | Maximum session blocks rendered per frame. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`. |
+
 ### Exit codes
 
 - `0` — clean shutdown via `Ctrl-C`
@@ -107,6 +118,7 @@ Multi-session terminal dashboard. Most-recently-active sessions appear first. Se
 codevigil watch
 codevigil --explain watch
 CODEVIGIL_WATCH_POLL_INTERVAL=1.0 codevigil watch
+CODEVIGIL_WATCH_DISPLAY_LIMIT=50 codevigil watch
 codevigil --config ./local.toml watch
 ```
 
