@@ -97,6 +97,7 @@ def test_assistant_user_system_round_trip_emits_typed_events() -> None:
     assert system.payload["subkind"] == "session_start"
 
     assert parser.stats.parse_confidence == 1.0
+    assert parser.stats.duplicate_count == 0
 
 
 def test_redacted_thinking_block_emits_zero_length() -> None:
