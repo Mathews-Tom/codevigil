@@ -1,13 +1,13 @@
-"""Acceptance tests for the Phase 0 watch-lifecycle fixture corpus.
+"""Acceptance tests for the watch-lifecycle fixture corpus.
 
 Verifies:
 1. All eight fixture JSONL files exist and are non-empty.
 2. The parser reads every fixture without raising.
 3. stamp_watch_fixtures() sets mtime within tolerance of the intended age offset.
 
-These tests do NOT test lifecycle classification (that is Phase 1); they only
-confirm the fixture corpus itself is structurally sound and the factory
-produces correctly back-dated copies.
+These tests do not classify lifecycle state; they only confirm the fixture
+corpus itself is structurally sound and the factory produces correctly
+back-dated copies.
 """
 
 from __future__ import annotations
@@ -92,9 +92,9 @@ def test_schema_drift_fixture_is_readable(stem: str) -> None:
     """Parser must not raise on schema-drift fixtures.
 
     These fixtures intentionally use historical shapes that the parser does
-    NOT yet fully recognise (that is the purpose of Phase 3). This test only
-    asserts the parser processes every line without an exception. It does NOT
-    assert high parse_confidence — that assertion belongs to Phase 3.
+    not yet fully recognise. This test only asserts the parser processes every
+    line without an exception. It does not assert high parse_confidence —
+    that assertion lives with the parser shape tests.
     """
     path = _SCHEMA_DRIFT_DIR / f"{stem}.jsonl"
     parser = SessionParser(session_id=stem)

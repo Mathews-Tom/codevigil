@@ -34,8 +34,8 @@ from pathlib import Path
 # ---------------------------------------------------------------------------
 # Age offsets in seconds for each fixture.
 # These map directly to the intended lifecycle classification documented in
-# the Phase 0 work items. Do NOT change them without updating the companion
-# acceptance note in .docs/watch-lifecycle-fix-plan.md.
+# the watch-lifecycle fixture corpus. Do NOT change them without updating the
+# companion acceptance note in .docs/watch-lifecycle-fix-plan.md.
 # ---------------------------------------------------------------------------
 
 #: Age offsets (seconds) keyed by fixture stem.
