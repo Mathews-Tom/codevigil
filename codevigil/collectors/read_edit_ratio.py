@@ -177,18 +177,20 @@ class ReadEditRatioCollector:
 
         if category == "mutation":
             self._mutations_total += 1
-            if file_path is not None:
-                self._mutations_with_path += 1
-                if self._is_blind(file_path):
-                    self._blind_mutations += 1
-            # When file_path is missing we cannot judge blindness, so
-            # we neither count the mutation as blind nor as not-blind.
-            # The tracking_confidence ratio drops accordingly.
-            # Track write vs. edit sub-categories for write_precision.
+            # Track write vs. edit sub-categories for write_precision; this
+            # does not depend on file_path so it runs unconditionally.
             if tool_name in _WRITE_TOOLS:
                 self._write_calls += 1
             elif tool_name in _EDIT_TOOLS:
                 self._edit_calls += 1
+            if file_path is None:
+                # When file_path is missing we cannot judge blindness, so we
+                # neither count the mutation as blind nor as not-blind — the
+                # tracking_confidence ratio drops accordingly.
+                return
+            self._mutations_with_path += 1
+            if self._is_blind(file_path):
+                self._blind_mutations += 1
         elif category in ("read", "research") and file_path is not None:
             # Record this read/research so a later mutation on the same
             # file can detect it regardless of unrelated tool calls
@@ -229,15 +231,14 @@ class ReadEditRatioCollector:
         if warming_up:
             severity = Severity.OK
             label = "warming up"
-        elif ratio < self._critical_threshold:
-            severity = Severity.CRITICAL
-            label = f"R:E {ratio:.1f}"
-        elif ratio < self._warn_threshold:
-            severity = Severity.WARN
-            label = f"R:E {ratio:.1f}"
         else:
-            severity = Severity.OK
             label = f"R:E {ratio:.1f}"
+            if ratio < self._critical_threshold:
+                severity = Severity.CRITICAL
+            elif ratio < self._warn_threshold:
+                severity = Severity.WARN
+            else:
+                severity = Severity.OK
 
         # write_precision: write_calls / (write_calls + edit_calls).
         # None when no mutation sub-category calls observed yet (not 0.0,
