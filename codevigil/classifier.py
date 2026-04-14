@@ -9,10 +9,10 @@ rule matched). The classifier is intentionally a pure function of a
 :class:`~codevigil.turns.Turn` snapshot so it can be tested in isolation
 without the aggregator stack.
 
-Category definitions and cascade algorithm are locked in
-``.docs/task-classifier-design.md``. Rule changes that affect calibration must
+Category definitions and cascade algorithm are documented in
+``docs/classifier.md``. Rule changes that affect calibration must
 be accompanied by a re-run of ``scripts/calibrate_classifier.py`` and an
-updated ``.docs/classifier-calibration.md``.
+updated ``docs/classifier-calibration.md``.
 
 **Zero new runtime dependencies.** This module uses ``stdlib re`` only.
 """
