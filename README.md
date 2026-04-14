@@ -4,7 +4,12 @@ Local, privacy-preserving observability for Claude Code sessions.
 
 codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics about reasoning and tool-use patterns, and surfaces them in a rich terminal dashboard or as JSON / markdown reports. **Zero network egress, no data ever leaves your machine.**
 
-Status: beta (0.2.0). Python 3.11 and 3.12.
+[![Status](https://img.shields.io/badge/status-beta-blue.svg)](https://github.com/Mathews-Tom/codevigil)
+[![Version](https://img.shields.io/badge/version-0.2.0-informational.svg)](CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/downloads/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
+[![CI](https://github.com/Mathews-Tom/codevigil/actions/workflows/ci.yml/badge.svg)](https://github.com/Mathews-Tom/codevigil/actions/workflows/ci.yml)
+[![Privacy](https://img.shields.io/badge/network%20egress-zero-success.svg)](docs/privacy.md)
 
 ## Install
 
