@@ -8,7 +8,7 @@ A first-run walkthrough. Assumes you have already installed codevigil via `uv to
 codevigil --version
 ```
 
-If this prints `codevigil 0.1.0` (or whatever you installed), you are ready. Otherwise see [installation.md](installation.md).
+If this prints `codevigil 0.2.0` (or whatever you installed), you are ready. Otherwise see [installation.md](installation.md).
 
 ## Step 2: Look at the resolved configuration
 
@@ -108,13 +108,17 @@ Watch mode is for live monitoring. For after-the-fact analysis use report mode:
 codevigil report ~/.claude/projects
 ```
 
-This walks the tree, parses every `*.jsonl` file it finds, runs every v0.1 collector against each session, and writes a JSON report to `~/.local/share/codevigil/reports/`. The default format is JSON; pass `--format markdown` to get a human-readable version instead:
+With no date flags, `report` renders three stacked periods — **today** (midnight UTC → now), **7d** (now - 7 days → now), and **30d** (now - 30 days → now) — in one invocation. JSON output in this mode is an object with three top-level keys `today`, `7d`, and `30d`. This is the 0.2.0 default.
+
+To fall back to the original single-period mode, pass `--from` or `--to`:
 
 ```bash
 codevigil report ~/.claude/projects --format markdown --from 2026-04-01
 ```
 
-The `--from` and `--to` flags filter sessions by their first event timestamp. Report output is **deterministic** under identical input — sessions sort by id, metric rows sort by name, no wall-clock timestamps are embedded — so you can diff two reports across time and see exactly which sessions changed.
+The `--from` and `--to` flags filter **events** by timestamp (not session boundaries) and clamp `started_at`/`ended_at` on each produced `SessionReport` to the in-window range. Sessions that straddle the window edges contribute only their in-window events; sessions that fall entirely outside the window emit no report at all. Scripts that depend on the pre-0.2.0 no-flag single-period output should pass `--from 1970-01-01` (or any open lower bound) to preserve the old shape.
+
+Report output is **deterministic** under identical input — sessions sort by id, metric rows sort by name, no wall-clock timestamps are embedded — so you can diff two reports across time and see exactly which sessions changed.
 
 If any session's parse confidence drops below `0.9` during the run, report exits with status `2`. This is intentional: it signals that the data integrity gate tripped and you should investigate before trusting the derived metrics. See [collectors.md#parse_health](collectors.md#parse_health) for what to look for.
 
@@ -155,7 +159,10 @@ On first write, codevigil logs a one-line notice naming the target directory. Af
 codevigil history list                                    # all stored sessions
 codevigil history list --since 2026-04-01 --severity warn # filter by date and severity
 codevigil history list --project my-project               # filter by project
+codevigil history list --task-type debug_loop             # filter by experimental task classifier label
 ```
+
+When any stored session carries a classifier label, `history list` renders an additional `task_type [experimental]` column. When no session has a label — or when the classifier is disabled in config — the column is hidden entirely.
 
 To inspect a single session in detail:
 
@@ -171,10 +178,16 @@ To compare two sessions side-by-side:
 codevigil history diff SESSION_A SESSION_B
 ```
 
-To render a tool × severity heatmap:
+To render a tool × severity heatmap with proportional Unicode gradient bars:
 
 ```bash
 codevigil history heatmap SESSION_ID
+```
+
+To cross-tab metrics against the experimental task classifier labels instead of severity:
+
+```bash
+codevigil history heatmap --axis task_type
 ```
 
 Full flag reference: [cli.md#history](cli.md#history).
@@ -209,10 +222,33 @@ python -m scripts.recalibrate_thresholds --fixtures-dir tests/fixtures/sessions
 
 This emits a TOML snippet you can paste into `~/.config/codevigil/config.toml`. See [collectors.md#experimental-thresholds-and-bootstrap](collectors.md#experimental-thresholds-and-bootstrap) for the full mechanism.
 
+## Step 8: The experimental task classifier
+
+0.2.0 ships a turn-level task classifier that labels each Claude Code turn as `exploration`, `mutation_heavy`, `debug_loop`, `planning`, or `mixed` and aggregates those labels into a session-level task type. The classifier runs entirely locally using stdlib `re` and a tool-presence heuristic — zero network, zero new runtime dependencies, zero telemetry.
+
+Labels surface in four places, each tagged `[experimental]` so you can tell classifier output apart from the deterministic collector output:
+
+- **`history list`** — new `task_type` column and `--task-type <label>` filter (hidden when no session has a label)
+- **`history heatmap --axis task_type`** — cross-tab metrics against task labels
+- **`history SESSION_ID`** — per-turn task-type headings in the event timeline
+- **`codevigil watch`** — right-aligned `[task: <label>]` tag in each session header
+
+The classifier is on by default. To turn it off:
+
+```toml
+[classifier]
+enabled = false
+```
+
+When disabled, all four surfaces degrade cleanly — no task column, no header tag, no per-turn headings — and `history heatmap --axis task_type` exits with a clear error.
+
+Full category definitions, the two-stage cascade algorithm, and the calibration methodology are documented in [classifier.md](classifier.md).
+
 ## Where to go next
 
 - [cli.md](cli.md) — every flag for every subcommand
 - [configuration.md](configuration.md) — every TOML key and env binding
 - [collectors.md](collectors.md) — what each metric measures and why
+- [classifier.md](classifier.md) — the experimental task classifier in detail
 - [privacy.md](privacy.md) — the privacy model in detail
 - [design.md](design.md) — architecture, plugin boundaries, error taxonomy
