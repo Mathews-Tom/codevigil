@@ -185,25 +185,7 @@ class TerminalRenderer:
             self._label_map = _build_label_map(list(current_ids))
             self._label_fleet = current_ids
 
-        # Compute fleet-level counters.
-        projects: set[str] = set()
-        crit = warn = ok = 0
-
-        for block in self._blocks.values():
-            if block.severity_rank == _SEVERITY_RANK[Severity.CRITICAL]:
-                crit += 1
-            elif block.severity_rank == _SEVERITY_RANK[Severity.WARN]:
-                warn += 1
-            else:
-                ok += 1
-            if block.project_key:
-                projects.add(block.project_key)
-
-        self._fleet_sessions = len(self._blocks)
-        self._fleet_crit = crit
-        self._fleet_warn = warn
-        self._fleet_ok = ok
-        self._fleet_projects = len(projects)
+        self._update_fleet_counters()
 
         sorted_ids = sorted(
             self._order,
@@ -233,15 +215,7 @@ class TerminalRenderer:
 
         renderables: list[Any] = [self._header_text()]
         for session_id in sorted_ids:
-            block = self._blocks[session_id]
-            renderables.extend(block.banner_items)
-            if block.session_header is not None:
-                renderables.append(block.session_header)
-            renderables.append(rich.rule.Rule(style="dim"))
-            if block.metric_table is not None:
-                renderables.append(block.metric_table)
-            renderables.append(rich.rule.Rule(style="dim"))
-            renderables.extend(block.footer_items)
+            renderables.extend(self._block_renderables(self._blocks[session_id]))
 
         if total_active > shown:
             renderables.append(
@@ -315,6 +289,39 @@ class TerminalRenderer:
             self._stream.flush()
 
     # --------------------------------------------------------------- helpers
+
+    def _update_fleet_counters(self) -> None:
+        """Recompute fleet-level severity counts and project set from buffered blocks."""
+        projects: set[str] = set()
+        crit = warn = ok = 0
+        crit_rank = _SEVERITY_RANK[Severity.CRITICAL]
+        warn_rank = _SEVERITY_RANK[Severity.WARN]
+        for block in self._blocks.values():
+            if block.severity_rank == crit_rank:
+                crit += 1
+            elif block.severity_rank == warn_rank:
+                warn += 1
+            else:
+                ok += 1
+            if block.project_key:
+                projects.add(block.project_key)
+        self._fleet_sessions = len(self._blocks)
+        self._fleet_crit = crit
+        self._fleet_warn = warn
+        self._fleet_ok = ok
+        self._fleet_projects = len(projects)
+
+    def _block_renderables(self, block: _SessionBlock) -> list[Any]:
+        """Return the ordered list of Rich renderables for one session block."""
+        parts: list[Any] = list(block.banner_items)
+        if block.session_header is not None:
+            parts.append(block.session_header)
+        parts.append(rich.rule.Rule(style="dim"))
+        if block.metric_table is not None:
+            parts.append(block.metric_table)
+        parts.append(rich.rule.Rule(style="dim"))
+        parts.extend(block.footer_items)
+        return parts
 
     def _stream_is_tty(self) -> bool:
         isatty = getattr(self._stream, "isatty", None)
@@ -438,49 +445,59 @@ class TerminalRenderer:
         self._baseline = {name: sorted(vals) for name, vals in by_metric.items()}
 
     def _actionable_hint(self, snap: MetricSnapshot) -> str:
-        detail = snap.detail
-        if not detail:
+        if not snap.detail:
             return ""
-        name = snap.name
-        if name == "stop_phrase":
-            recent = detail.get("recent_hits")
-            if not (isinstance(recent, list) and recent):
-                return ""
-            latest = recent[-1]
-            if not isinstance(latest, dict):
-                return ""
-            phrase = latest.get("phrase")
-            if not isinstance(phrase, str):
-                return ""
-            hint_parts: list[str] = [f"last: {phrase!r}"]
-            category = latest.get("category")
-            if isinstance(category, str):
-                hint_parts.append(f"({category})")
-            snippet = latest.get("context_snippet")
-            if isinstance(snippet, str) and snippet:
-                trunc = snippet[:40].replace("\n", " ")
-                hint_parts.append(f"ctx: {trunc!r}")
-            return " ".join(hint_parts)
-        if name == "reasoning_loop":
-            burst = detail.get("max_burst")
-            calls = detail.get("tool_calls")
-            if isinstance(burst, int) and isinstance(calls, int):
-                return f"burst {burst}, {calls} tool calls"
-            return ""
-        if name == "read_edit_ratio":
-            blind = detail.get("blind_edit_rate")
-            if isinstance(blind, dict):
-                rate = blind.get("value")
-                if isinstance(rate, (int, float)):
-                    return f"blind {rate * 100:.0f}%"
-            return ""
-        if name == "parse_health":
-            missing = detail.get("missing_fields")
-            if isinstance(missing, dict) and missing:
-                top = sorted(missing.items(), key=lambda kv: -kv[1])[:2]
-                return "missing " + ", ".join(f"{k}x{v}" for k, v in top)
-            return ""
+        if snap.name == "stop_phrase":
+            return self._hint_stop_phrase(snap.detail)
+        if snap.name == "reasoning_loop":
+            return self._hint_reasoning_loop(snap.detail)
+        if snap.name == "read_edit_ratio":
+            return self._hint_read_edit_ratio(snap.detail)
+        if snap.name == "parse_health":
+            return self._hint_parse_health(snap.detail)
         return ""
+
+    def _hint_stop_phrase(self, detail: dict[str, Any]) -> str:
+        recent = detail.get("recent_hits")
+        if not (isinstance(recent, list) and recent):
+            return ""
+        latest = recent[-1]
+        if not isinstance(latest, dict):
+            return ""
+        phrase = latest.get("phrase")
+        if not isinstance(phrase, str):
+            return ""
+        parts: list[str] = [f"last: {phrase!r}"]
+        category = latest.get("category")
+        if isinstance(category, str):
+            parts.append(f"({category})")
+        snippet = latest.get("context_snippet")
+        if isinstance(snippet, str) and snippet:
+            parts.append(f"ctx: {snippet[:40].replace(chr(10), ' ')!r}")
+        return " ".join(parts)
+
+    def _hint_reasoning_loop(self, detail: dict[str, Any]) -> str:
+        burst = detail.get("max_burst")
+        calls = detail.get("tool_calls")
+        if isinstance(burst, int) and isinstance(calls, int):
+            return f"burst {burst}, {calls} tool calls"
+        return ""
+
+    def _hint_read_edit_ratio(self, detail: dict[str, Any]) -> str:
+        blind = detail.get("blind_edit_rate")
+        if not isinstance(blind, dict):
+            return ""
+        rate = blind.get("value")
+        if isinstance(rate, (int, float)):
+            return f"blind {rate * 100:.0f}%"
+        return ""
+
+    def _hint_parse_health(self, detail: dict[str, Any]) -> str:
+        missing = detail.get("missing_fields")
+        if not (isinstance(missing, dict) and missing):
+            return ""
+        top = sorted(missing.items(), key=lambda kv: -kv[1])[:2]
+        return "missing " + ", ".join(f"{k}x{v}" for k, v in top)
 
 
 # ---------------------------------------------------------------------------

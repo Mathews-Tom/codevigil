@@ -146,41 +146,14 @@ def _render_task_type_crosstab(
     label ``(unclassified)``. Cells with no observations show ``—``.
     """
     console = rich.console.Console(file=out, highlight=False)
-
-    # Collect unique task types and metric names.
-    task_types: list[str] = []
-    seen_types: set[str] = set()
-    metric_names: set[str] = set()
-
-    for report in reports:
-        label = report.session_task_type or "(unclassified)"
-        if label not in seen_types:
-            seen_types.add(label)
-            task_types.append(label)
-        metric_names.update(report.metrics.keys())
-
-    sorted_metrics = sorted(metric_names)
-    # Build accumulator: task_type → metric → list[float]
-    accum: dict[str, dict[str, list[float]]] = {tt: {} for tt in task_types}
-    for report in reports:
-        label = report.session_task_type or "(unclassified)"
-        for mname, mval in report.metrics.items():
-            accum[label].setdefault(mname, []).append(mval)
+    task_types, sorted_metrics, accum = _build_task_type_accum(reports)
+    col_max = _compute_col_max(accum, task_types)
 
     badge = f" {_EXPERIMENTAL_BADGE}" if classifier_experimental else ""
-    tbl = rich.table.Table(
-        title=f"Heatmap by task_type{badge}",
-        show_header=True,
-    )
+    tbl = rich.table.Table(title=f"Heatmap by task_type{badge}", show_header=True)
     tbl.add_column("metric", style="bold")
     for tt in task_types:
         tbl.add_column(tt, justify="right")
-
-    # Pre-compute per task_type column maximums for proportional bars.
-    col_max: dict[str, float] = {}
-    for tt in task_types:
-        vals_across_metrics = [sum(vs) / len(vs) for vs in accum[tt].values() if vs]
-        col_max[tt] = max(vals_across_metrics, default=1.0)
 
     for mname in sorted_metrics:
         row_vals: list[str] = [mname]
@@ -194,6 +167,48 @@ def _render_task_type_crosstab(
         tbl.add_row(*row_vals)
 
     console.print(tbl)
+
+
+def _build_task_type_accum(
+    reports: list[SessionReport],
+) -> tuple[list[str], list[str], dict[str, dict[str, list[float]]]]:
+    """Scan reports and build the task-type accumulator for cross-tab rendering.
+
+    Returns:
+        task_types: Ordered list of unique task-type labels (insertion order).
+        sorted_metrics: Sorted list of all metric names seen across all reports.
+        accum: Mapping of task_type → metric → list of observed values.
+    """
+    task_types: list[str] = []
+    seen_types: set[str] = set()
+    metric_names: set[str] = set()
+
+    for report in reports:
+        label = report.session_task_type or "(unclassified)"
+        if label not in seen_types:
+            seen_types.add(label)
+            task_types.append(label)
+        metric_names.update(report.metrics.keys())
+
+    accum: dict[str, dict[str, list[float]]] = {tt: {} for tt in task_types}
+    for report in reports:
+        label = report.session_task_type or "(unclassified)"
+        for mname, mval in report.metrics.items():
+            accum[label].setdefault(mname, []).append(mval)
+
+    return task_types, sorted(metric_names), accum
+
+
+def _compute_col_max(
+    accum: dict[str, dict[str, list[float]]],
+    task_types: list[str],
+) -> dict[str, float]:
+    """Compute the per-column maximum mean value for proportional bar scaling."""
+    col_max: dict[str, float] = {}
+    for tt in task_types:
+        means = [sum(vs) / len(vs) for vs in accum[tt].values() if vs]
+        col_max[tt] = max(means, default=1.0)
+    return col_max
 
 
 __all__ = ["run_heatmap"]

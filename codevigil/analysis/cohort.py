@@ -34,6 +34,7 @@ the compare path, which may choose different display strategies.
 from __future__ import annotations
 
 import statistics
+from collections import defaultdict
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import date
@@ -109,7 +110,9 @@ def reduce_by(
 
     key_fn = _KEY_FNS[dimension]
     # buckets[dim_value][metric_name] = list of float values
-    buckets: dict[str, dict[str, list[float]]] = {}
+    buckets: defaultdict[str, defaultdict[str, list[float]]] = defaultdict(
+        lambda: defaultdict(list)
+    )
     excluded = 0
 
     for report in reports:
@@ -117,11 +120,7 @@ def reduce_by(
         if dim_value is None:
             excluded += 1
             continue
-        if dim_value not in buckets:
-            buckets[dim_value] = {}
         for metric_name, metric_value in report.metrics.items():
-            if metric_name not in buckets[dim_value]:
-                buckets[dim_value][metric_name] = []
             buckets[dim_value][metric_name].append(metric_value)
 
     cells: list[CohortCell] = []

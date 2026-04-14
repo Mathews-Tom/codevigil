@@ -90,46 +90,52 @@ def _render_diff(a: SessionReport, b: SessionReport) -> str:
 def _render_diff_to_console(
     a: SessionReport, b: SessionReport, *, console: rich.console.Console
 ) -> None:
-    # --- header comparison table ---
-    header_tbl = rich.table.Table(title="Session Diff — Header", show_header=True)
-    header_tbl.add_column("field", style="bold")
-    header_tbl.add_column("session A")
-    header_tbl.add_column("session B")
+    console.print(_build_header_table(a, b))
+    console.print(_build_metric_table(a, b))
 
-    def _row(label: str, val_a: str, val_b: str) -> None:
-        header_tbl.add_row(label, val_a, val_b)
 
-    _row("session_id", a.session_id, b.session_id)
-    _row(
-        "project",
-        a.project_name or a.project_hash or "—",
-        b.project_name or b.project_hash or "—",
-    )
-    _row("model", a.model or "—", b.model or "—")
-    _row("permission_mode", a.permission_mode or "—", b.permission_mode or "—")
-    _row("started_at", format_started_at(a.started_at), format_started_at(b.started_at))
+def _build_header_table(a: SessionReport, b: SessionReport) -> rich.table.Table:
+    """Build the header comparison table for session metadata fields."""
+    tbl = rich.table.Table(title="Session Diff — Header", show_header=True)
+    tbl.add_column("field", style="bold")
+    tbl.add_column("session A")
+    tbl.add_column("session B")
 
     dur_a = a.duration_seconds
     dur_b = b.duration_seconds
     delta_dur = dur_b - dur_a
-    sign = "+" if delta_dur >= 0 else ""
-    _row(
-        "duration",
-        format_duration(dur_a),
-        f"{format_duration(dur_b)} ({sign}{delta_dur:.0f}s)",
-    )
+    dur_sign = "+" if delta_dur >= 0 else ""
 
-    _row("events", str(a.event_count), str(b.event_count))
-    _row("severity", severity_of_report(a), severity_of_report(b))
+    rows: list[tuple[str, str, str]] = [
+        ("session_id", a.session_id, b.session_id),
+        (
+            "project",
+            a.project_name or a.project_hash or "—",
+            b.project_name or b.project_hash or "—",
+        ),
+        ("model", a.model or "—", b.model or "—"),
+        ("permission_mode", a.permission_mode or "—", b.permission_mode or "—"),
+        ("started_at", format_started_at(a.started_at), format_started_at(b.started_at)),
+        (
+            "duration",
+            format_duration(dur_a),
+            f"{format_duration(dur_b)} ({dur_sign}{delta_dur:.0f}s)",
+        ),
+        ("events", str(a.event_count), str(b.event_count)),
+        ("severity", severity_of_report(a), severity_of_report(b)),
+    ]
+    for label, val_a, val_b in rows:
+        tbl.add_row(label, val_a, val_b)
+    return tbl
 
-    console.print(header_tbl)
 
-    # --- metric diff table aligned via LCS over sorted metric names ---
-    metric_tbl = rich.table.Table(title="Metric Diff", show_header=True)
-    metric_tbl.add_column("metric", style="bold")
-    metric_tbl.add_column("value A", justify="right")
-    metric_tbl.add_column("value B", justify="right")
-    metric_tbl.add_column("delta (B-A)", justify="right")
+def _build_metric_table(a: SessionReport, b: SessionReport) -> rich.table.Table:
+    """Build the metric diff table aligned via LCS over sorted metric names."""
+    tbl = rich.table.Table(title="Metric Diff", show_header=True)
+    tbl.add_column("metric", style="bold")
+    tbl.add_column("value A", justify="right")
+    tbl.add_column("value B", justify="right")
+    tbl.add_column("delta (B-A)", justify="right")
 
     metrics_a = a.metrics
     metrics_b = b.metrics
@@ -144,20 +150,15 @@ def _render_diff_to_console(
                 vb = metrics_b[kb]
                 delta = vb - va
                 dsign = "+" if delta >= 0 else ""
-                metric_tbl.add_row(ka, f"{va:.4f}", f"{vb:.4f}", f"{dsign}{delta:.4f}")
-        elif tag == "replace":
+                tbl.add_row(ka, f"{va:.4f}", f"{vb:.4f}", f"{dsign}{delta:.4f}")
+        elif tag in ("replace", "delete"):
             for k in keys_a[i1:i2]:
-                metric_tbl.add_row(k, f"{metrics_a[k]:.4f}", "(absent)", "—")
+                tbl.add_row(k, f"{metrics_a[k]:.4f}", "(absent)", "—")
+        if tag in ("replace", "insert"):
             for k in keys_b[j1:j2]:
-                metric_tbl.add_row(k, "(absent)", f"{metrics_b[k]:.4f}", "—")
-        elif tag == "delete":
-            for k in keys_a[i1:i2]:
-                metric_tbl.add_row(k, f"{metrics_a[k]:.4f}", "(absent)", "—")
-        elif tag == "insert":
-            for k in keys_b[j1:j2]:
-                metric_tbl.add_row(k, "(absent)", f"{metrics_b[k]:.4f}", "—")
+                tbl.add_row(k, "(absent)", f"{metrics_b[k]:.4f}", "—")
 
-    console.print(metric_tbl)
+    return tbl
 
 
 __all__ = ["run_diff"]

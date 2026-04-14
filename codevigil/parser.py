@@ -540,33 +540,38 @@ class SessionParser:
 
         emitted = 0
         for block in self._content_blocks(message):
-            block_type = block.get("type")
-            if block_type == "text":
-                event = self._build_assistant_text_event(
-                    block, message, timestamp, session_id, msg_id
-                )
-                if event is not None:
-                    emitted += 1
-                    yield event
-            elif block_type == "tool_use":
-                event = self._build_tool_call_event(block, timestamp, session_id, msg_id)
-                if event is not None:
-                    emitted += 1
-                    yield event
-            elif block_type == "thinking":
-                event = self._build_thinking_event(block, timestamp, session_id, msg_id)
-                if event is not None:
-                    emitted += 1
-                    yield event
-            else:
-                self._stats.record_missing("content.type")
+            event = self._build_assistant_block_event(block, message, timestamp, session_id, msg_id)
+            if event is not None:
+                emitted += 1
+                yield event
 
-        if emitted == 0:
-            # Nothing useful in the line: still count it as parsed so a
-            # lone "assistant with no content" doesn't masquerade as drift.
-            self._stats.parsed_events += 1
-        else:
-            self._stats.parsed_events += emitted
+        # Nothing useful in the line: still count it as parsed so a
+        # lone "assistant with no content" doesn't masquerade as drift.
+        self._stats.parsed_events += max(emitted, 1)
+
+    def _build_assistant_block_event(
+        self,
+        block: dict[str, Any],
+        message: dict[str, Any],
+        timestamp: datetime,
+        session_id: str,
+        message_id: str | None = None,
+    ) -> Event | None:
+        """Dispatch a single assistant content block to its builder.
+
+        Returns None for unknown block types (and records the missing field).
+        """
+        block_type = block.get("type")
+        if block_type == "text":
+            return self._build_assistant_text_event(
+                block, message, timestamp, session_id, message_id
+            )
+        if block_type == "tool_use":
+            return self._build_tool_call_event(block, timestamp, session_id, message_id)
+        if block_type == "thinking":
+            return self._build_thinking_event(block, timestamp, session_id, message_id)
+        self._stats.record_missing("content.type")
+        return None
 
     def _build_assistant_text_event(
         self,
@@ -713,14 +718,16 @@ class SessionParser:
 
         blocks = self._content_blocks(message)
         emitted = 0
+
         if not blocks:
-            text = message.get("content") if isinstance(message.get("content"), str) else None
-            if isinstance(text, str):
+            # Fallback: bare string content with no typed blocks.
+            content = message.get("content")
+            if isinstance(content, str):
                 yield Event(
                     timestamp=timestamp,
                     session_id=session_id,
                     kind=EventKind.USER_MESSAGE,
-                    payload={"text": text},
+                    payload={"text": content},
                     message_id=msg_id,
                 )
                 emitted += 1
@@ -728,32 +735,41 @@ class SessionParser:
                 self._stats.record_missing("text")
 
         for block in blocks:
-            block_type = block.get("type")
-            if block_type == "text":
-                text = block.get("text")
-                if not isinstance(text, str):
-                    self._stats.record_missing("text")
-                    continue
-                yield Event(
-                    timestamp=timestamp,
-                    session_id=session_id,
-                    kind=EventKind.USER_MESSAGE,
-                    payload={"text": text},
-                    message_id=msg_id,
-                )
+            event = self._build_user_block_event(block, timestamp, session_id, msg_id)
+            if event is not None:
+                yield event
                 emitted += 1
-            elif block_type == "tool_result":
-                event = self._build_tool_result_event(block, timestamp, session_id, msg_id)
-                if event is not None:
-                    yield event
-                    emitted += 1
-            else:
-                self._stats.record_missing("content.type")
 
-        if emitted == 0:
-            self._stats.parsed_events += 1
-        else:
-            self._stats.parsed_events += emitted
+        self._stats.parsed_events += max(emitted, 1)
+
+    def _build_user_block_event(
+        self,
+        block: dict[str, Any],
+        timestamp: datetime,
+        session_id: str,
+        message_id: str | None = None,
+    ) -> Event | None:
+        """Dispatch a single user content block to its builder.
+
+        Returns None for unknown block types (and records the missing field).
+        """
+        block_type = block.get("type")
+        if block_type == "text":
+            text = block.get("text")
+            if not isinstance(text, str):
+                self._stats.record_missing("text")
+                return None
+            return Event(
+                timestamp=timestamp,
+                session_id=session_id,
+                kind=EventKind.USER_MESSAGE,
+                payload={"text": text},
+                message_id=message_id,
+            )
+        if block_type == "tool_result":
+            return self._build_tool_result_event(block, timestamp, session_id, message_id)
+        self._stats.record_missing("content.type")
+        return None
 
     def _build_tool_result_event(
         self,
@@ -818,37 +834,12 @@ class SessionParser:
         # Sub-shape 1: top-level "content" list (pre-v1 role/ts/session).
         content = parsed.get("content")
         if isinstance(content, list):
-            blocks = [b for b in content if isinstance(b, dict)]
-            for block in blocks:
-                block_type = block.get("type")
-                if block_type == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        emitted += 1
-                        yield Event(
-                            timestamp=timestamp,
-                            session_id=session_id,
-                            kind=EventKind.ASSISTANT_MESSAGE,
-                            payload={"text": text},
-                        )
-                    else:
-                        self._stats.record_missing("text")
-                elif block_type == "tool_use":
-                    event = self._build_tool_call_event(block, timestamp, session_id)
-                    if event is not None:
-                        emitted += 1
-                        yield event
-                elif block_type == "thinking":
-                    event = self._build_thinking_event(block, timestamp, session_id)
-                    if event is not None:
-                        emitted += 1
-                        yield event
-                else:
-                    self._stats.record_missing("content.type")
-            if emitted == 0:
-                self._stats.parsed_events += 1
-            else:
-                self._stats.parsed_events += emitted
+            for block in (b for b in content if isinstance(b, dict)):
+                event = self._build_assistant_block_event(block, {}, timestamp, session_id)
+                if event is not None:
+                    emitted += 1
+                    yield event
+            self._stats.parsed_events += max(emitted, 1)
             return
 
         # Sub-shape 2: flat text / tool+tool_input keys (pre-v1 flat-content).
@@ -882,9 +873,8 @@ class SessionParser:
 
         if has_tool:
             tool_name_raw: str = parsed["tool"]
-            tool_input = parsed.get("tool_input")
-            if not isinstance(tool_input, dict):
-                tool_input = {}
+            tool_input_raw = parsed.get("tool_input")
+            tool_input: dict[str, Any] = tool_input_raw if isinstance(tool_input_raw, dict) else {}
             canonical = canonicalise_tool_name(tool_name_raw)
             if canonical == tool_name_raw and tool_name_raw not in TOOL_ALIASES.values():
                 self._note_unknown_tool(tool_name_raw)
@@ -929,32 +919,12 @@ class SessionParser:
         # Sub-shape 1: top-level "content" list (pre-v1 role/ts/session).
         content = parsed.get("content")
         if isinstance(content, list):
-            blocks = [b for b in content if isinstance(b, dict)]
-            for block in blocks:
-                block_type = block.get("type")
-                if block_type == "text":
-                    text = block.get("text")
-                    if isinstance(text, str):
-                        emitted += 1
-                        yield Event(
-                            timestamp=timestamp,
-                            session_id=session_id,
-                            kind=EventKind.USER_MESSAGE,
-                            payload={"text": text},
-                        )
-                    else:
-                        self._stats.record_missing("text")
-                elif block_type == "tool_result":
-                    event = self._build_tool_result_event(block, timestamp, session_id)
-                    if event is not None:
-                        emitted += 1
-                        yield event
-                else:
-                    self._stats.record_missing("content.type")
-            if emitted == 0:
-                self._stats.parsed_events += 1
-            else:
-                self._stats.parsed_events += emitted
+            for block in (b for b in content if isinstance(b, dict)):
+                event = self._build_user_block_event(block, timestamp, session_id)
+                if event is not None:
+                    emitted += 1
+                    yield event
+            self._stats.parsed_events += max(emitted, 1)
             return
 
         # Sub-shape 2: flat text / tool_result keys (pre-v1 flat-content).

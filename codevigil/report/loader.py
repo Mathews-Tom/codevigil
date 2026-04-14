@@ -116,14 +116,49 @@ def _load_one(
     ``SessionReport`` are clamped to the first/last in-window event
     timestamps rather than the raw session boundaries.
     """
-    from codevigil.collectors import COLLECTORS  # local import to avoid boot cycle
-
     session_id = path.stem
     parser = SessionParser(session_id=session_id)
+    collector_instances = _build_collector_instances(cfg, parser)
 
-    # Mirror the collector instantiation order from cli._build_session_report:
-    # parse_health first (it must bind parser.stats), then the rest in
-    # config order.
+    event_count, first_ts, last_ts = _ingest_events(
+        path, parser, collector_instances, from_timestamp, to_timestamp
+    )
+
+    if event_count == 0:
+        return None
+
+    snapshots = _collect_snapshots(collector_instances)
+    metrics: dict[str, float] = {name: snap.value for name, snap in snapshots.items()}
+    _inject_write_precision(metrics, snapshots)
+
+    started: datetime = first_ts if first_ts is not None else datetime.now(UTC)
+    ended: datetime = last_ts if last_ts is not None else started
+
+    return build_report(
+        session_id=session_id,
+        project_hash=_UNKNOWN_PROJECT,
+        project_name=None,
+        model=None,
+        permission_mode=None,
+        started_at=started,
+        ended_at=ended,
+        event_count=event_count,
+        parse_confidence=float(parser.stats.parse_confidence),
+        metrics=metrics,
+    )
+
+
+def _build_collector_instances(
+    cfg: dict[str, Any],
+    parser: SessionParser,
+) -> dict[str, Any]:
+    """Instantiate and bind collectors in the correct order for offline loading.
+
+    Mirrors the collector instantiation order from cli._build_session_report:
+    parse_health first (it must bind parser.stats), then the rest in config order.
+    """
+    from codevigil.collectors import COLLECTORS  # local import to avoid boot cycle
+
     names: list[str] = ["parse_health"] if "parse_health" in COLLECTORS else []
     for name in cfg.get("collectors", {}).get("enabled", []):
         if name == "parse_health":
@@ -131,14 +166,29 @@ def _load_one(
         if name in COLLECTORS:
             names.append(name)
 
-    collector_instances: dict[str, Any] = {}
+    instances: dict[str, Any] = {}
     for name in names:
         instance = COLLECTORS[name]()
         bind = getattr(instance, "bind_stats", None)
         if callable(bind):
             bind(parser.stats)
-        collector_instances[name] = instance
+        instances[name] = instance
+    return instances
 
+
+def _ingest_events(
+    path: Path,
+    parser: SessionParser,
+    collector_instances: dict[str, Any],
+    from_timestamp: datetime | None,
+    to_timestamp: datetime | None,
+) -> tuple[int, datetime | None, datetime | None]:
+    """Stream events from *path* through all collectors, respecting the time window.
+
+    Returns ``(event_count, first_ts, last_ts)`` for in-window events only.
+    Raises ``OSError`` on I/O failure. ``CodevigilError`` from individual
+    collectors is silently swallowed so one bad collector cannot abort the session.
+    """
     first_ts: datetime | None = None
     last_ts: datetime | None = None
     event_count = 0
@@ -164,39 +214,20 @@ def _load_one(
     except OSError as exc:
         raise OSError(f"cannot read {path}: {exc}") from exc
 
-    if event_count == 0:
-        return None
+    return event_count, first_ts, last_ts
 
+
+def _collect_snapshots(
+    collector_instances: dict[str, Any],
+) -> dict[str, MetricSnapshot]:
+    """Call ``snapshot()`` on each collector, skipping any that raise ``CodevigilError``."""
     snapshots: dict[str, MetricSnapshot] = {}
     for name, collector in collector_instances.items():
         try:
             snapshots[name] = collector.snapshot()
         except CodevigilError:
             continue
-
-    # Build the primary metrics dict: collector_name -> snapshot.value.
-    metrics: dict[str, float] = {}
-    for name, snap in snapshots.items():
-        metrics[name] = snap.value
-
-    # Augment with write_precision extracted from read_edit_ratio detail.
-    _inject_write_precision(metrics, snapshots)
-
-    started: datetime = first_ts if first_ts is not None else datetime.now(UTC)
-    ended: datetime = last_ts if last_ts is not None else started
-
-    return build_report(
-        session_id=session_id,
-        project_hash=_UNKNOWN_PROJECT,
-        project_name=None,
-        model=None,
-        permission_mode=None,
-        started_at=started,
-        ended_at=ended,
-        event_count=event_count,
-        parse_confidence=float(parser.stats.parse_confidence),
-        metrics=metrics,
-    )
+    return snapshots
 
 
 def _event_in_window(

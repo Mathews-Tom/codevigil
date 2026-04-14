@@ -53,6 +53,79 @@ from codevigil.watcher import PollingSource
 # ---------------------------------------------------------------------------
 
 
+def _add_report_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register the ``report`` subcommand and all its flags."""
+    p = sub.add_parser("report", help="Batch analysis over one or more session files.")
+    p.add_argument("path", type=str, help="File, directory, or glob pattern.")
+    p.add_argument(
+        "--from",
+        dest="from_date",
+        type=str,
+        default=None,
+        help="Filter sessions whose first event is on/after YYYY-MM-DD.",
+    )
+    p.add_argument(
+        "--to",
+        dest="to_date",
+        type=str,
+        default=None,
+        help="Filter sessions whose first event is on/before YYYY-MM-DD.",
+    )
+    p.add_argument(
+        "--format",
+        choices=("json", "markdown"),
+        default="json",
+        help="Output format (default: json).",
+    )
+    p.add_argument(
+        "--output",
+        type=Path,
+        default=None,
+        help="Override the report output directory (must live under $HOME).",
+    )
+    p.add_argument(
+        "--group-by",
+        dest="group_by",
+        choices=("day", "week", "project", "model", "permission_mode"),
+        default=None,
+        help=(
+            "Produce a cohort trend table grouped by this dimension. "
+            "Rows are dimension values, columns are metrics, "
+            "cells show mean ± stdev (n). Cells with n<5 are redacted. "
+            "Incompatible with --compare-periods."
+        ),
+    )
+    p.add_argument(
+        "--compare-periods",
+        dest="compare_periods",
+        type=str,
+        default=None,
+        metavar="A_START:A_END,B_START:B_END",
+        help=(
+            "Compare two date ranges in YYYY-MM-DD:YYYY-MM-DD format, "
+            "separated by a comma. Example: "
+            "2026-03-01:2026-03-15,2026-04-01:2026-04-15. "
+            "Produces a signed delta table and a prose summary per metric. "
+            "Incompatible with --group-by."
+        ),
+    )
+
+
+def _add_history_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParser]) -> None:
+    """Register the ``history`` subcommand.
+
+    Arguments are parsed manually in ``_run_history`` because argparse
+    subparsers conflict with the ``codevigil history <SESSION_ID>``
+    positional-as-detail-view pattern. We accept REMAINDER and dispatch
+    manually based on the first positional word.
+    """
+    p = sub.add_parser(
+        "history",
+        help="Retrospective analysis of stored session reports.",
+    )
+    p.add_argument("history_args", nargs=argparse.REMAINDER, help=argparse.SUPPRESS)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codevigil",
@@ -83,84 +156,12 @@ def _build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("watch", help="Live tick loop over ~/.claude/projects session files.")
 
-    report_parser = sub.add_parser(
-        "report",
-        help="Batch analysis over one or more session files.",
-    )
-    report_parser.add_argument("path", type=str, help="File, directory, or glob pattern.")
-    report_parser.add_argument(
-        "--from",
-        dest="from_date",
-        type=str,
-        default=None,
-        help="Filter sessions whose first event is on/after YYYY-MM-DD.",
-    )
-    report_parser.add_argument(
-        "--to",
-        dest="to_date",
-        type=str,
-        default=None,
-        help="Filter sessions whose first event is on/before YYYY-MM-DD.",
-    )
-    report_parser.add_argument(
-        "--format",
-        choices=("json", "markdown"),
-        default="json",
-        help="Output format (default: json).",
-    )
-    report_parser.add_argument(
-        "--output",
-        type=Path,
-        default=None,
-        help="Override the report output directory (must live under $HOME).",
-    )
-    report_parser.add_argument(
-        "--group-by",
-        dest="group_by",
-        choices=("day", "week", "project", "model", "permission_mode"),
-        default=None,
-        help=(
-            "Produce a cohort trend table grouped by this dimension. "
-            "Rows are dimension values, columns are metrics, "
-            "cells show mean ± stdev (n). Cells with n<5 are redacted. "
-            "Incompatible with --compare-periods."
-        ),
-    )
-    report_parser.add_argument(
-        "--compare-periods",
-        dest="compare_periods",
-        type=str,
-        default=None,
-        metavar="A_START:A_END,B_START:B_END",
-        help=(
-            "Compare two date ranges in YYYY-MM-DD:YYYY-MM-DD format, "
-            "separated by a comma. Example: "
-            "2026-03-01:2026-03-15,2026-04-01:2026-04-15. "
-            "Produces a signed delta table and a prose summary per metric. "
-            "Incompatible with --group-by."
-        ),
-    )
+    _add_report_subparser(sub)
 
-    export_parser = sub.add_parser(
-        "export",
-        help="Stream parsed events as NDJSON on stdout.",
-    )
+    export_parser = sub.add_parser("export", help="Stream parsed events as NDJSON on stdout.")
     export_parser.add_argument("path", type=str, help="File, directory, or glob pattern.")
 
-    # history — all arguments are parsed manually in _run_history because
-    # argparse subparsers conflict with the ``codevigil history <SESSION_ID>``
-    # positional-as-detail-view pattern. We accept REMAINDER and dispatch
-    # manually based on the first positional word.
-    history_parser = sub.add_parser(
-        "history",
-        help="Retrospective analysis of stored session reports.",
-        # Disable abbreviated prefix matching so 'list' does not match 'l'.
-    )
-    history_parser.add_argument(
-        "history_args",
-        nargs=argparse.REMAINDER,
-        help=argparse.SUPPRESS,
-    )
+    _add_history_subparser(sub)
 
     return parser
 
@@ -168,6 +169,16 @@ def _build_parser() -> argparse.ArgumentParser:
 # ---------------------------------------------------------------------------
 # Dispatch
 # ---------------------------------------------------------------------------
+
+
+def _run_config_check(args: argparse.Namespace) -> int:
+    try:
+        resolved = load_config(config_path=args.config)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
+        return 2 if err.level is ErrorLevel.CRITICAL else 1
+    sys.stdout.write(render_config_check(resolved))
+    return 0
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -180,13 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "config":
         if args.config_command == "check":
-            try:
-                resolved = load_config(config_path=args.config)
-            except ConfigError as err:
-                sys.stderr.write(_format_error(err))
-                return 2 if err.level is ErrorLevel.CRITICAL else 1
-            sys.stdout.write(render_config_check(resolved))
-            return 0
+            return _run_config_check(args)
         parser.error(f"unknown config subcommand {args.config_command!r}")
 
     if args.command == "watch":
@@ -230,6 +235,24 @@ def _install_sigint_handler() -> None:
     signal.signal(signal.SIGINT, _handler)
 
 
+def _run_one_tick(
+    aggregator: SessionAggregator,
+    renderer: TerminalRenderer,
+    *,
+    explain: bool,
+) -> None:
+    """Execute a single watch tick: collect pairs, render each session."""
+    try:
+        pairs = list(aggregator.tick())
+    except CodevigilError as err:
+        renderer.render_error(err, None)
+        pairs = []
+    renderer.begin_tick()
+    for meta, snapshots in pairs:
+        renderer.render(_apply_explain_to_snapshots(snapshots, explain=explain), meta)
+    renderer.end_tick()
+
+
 def _run_watch(args: argparse.Namespace) -> int:
     global _shutdown_requested
     _shutdown_requested = False
@@ -261,33 +284,22 @@ def _run_watch(args: argparse.Namespace) -> int:
         bootstrap=bootstrap,
     )
 
-    show_badge = _any_experimental_enabled(cfg)
     storage_cfg = cfg.get("storage", {})
     baseline_store: SessionStore | None = (
         SessionStore() if bool(storage_cfg.get("enable_persistence", False)) else None
     )
     renderer = TerminalRenderer(
-        show_experimental_badge=show_badge,
+        show_experimental_badge=_any_experimental_enabled(cfg),
         baseline_store=baseline_store,
         display_limit=int(watch_cfg["display_limit"]),
     )
     explain = bool(args.explain)
-
-    _install_sigint_handler()
     tick_interval = float(watch_cfg["tick_interval"])
+    _install_sigint_handler()
 
     try:
         while True:
-            try:
-                pairs = list(aggregator.tick())
-            except CodevigilError as err:
-                renderer.render_error(err, None)
-                pairs = []
-            renderer.begin_tick()
-            for meta, snapshots in pairs:
-                adjusted = _apply_explain_to_snapshots(snapshots, explain=explain)
-                renderer.render(adjusted, meta)
-            renderer.end_tick()
+            _run_one_tick(aggregator, renderer, explain=explain)
             if _shutdown_requested:
                 break
             time.sleep(tick_interval)
@@ -424,13 +436,31 @@ class _SessionReport:
     metrics: list[MetricSnapshot]
 
 
+def _emit_single_period_report(
+    session_reports: list[_SessionReport],
+    output_dir: Path,
+    *,
+    fmt: str,
+    explain: bool,
+) -> None:
+    """Render and write a single-period report in json or markdown format."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    if fmt == "json":
+        payload = _render_report_json(session_reports, explain=explain)
+        _write_report(output_dir / "report.json", payload)
+    else:
+        payload = _render_report_markdown(session_reports, explain=explain)
+        _write_report(output_dir / "report.md", payload)
+    sys.stdout.write(payload)
+    sys.stdout.flush()
+
+
 def _run_report(args: argparse.Namespace) -> int:
     try:
         resolved = load_config(config_path=args.config)
     except ConfigError as err:
         sys.stderr.write(_format_error(err))
         return 2 if err.level is ErrorLevel.CRITICAL else 1
-
     cfg = resolved.values
 
     # Mutual exclusivity check for the two new flags.
@@ -451,9 +481,7 @@ def _run_report(args: argparse.Namespace) -> int:
     # Multi-period default path: when neither --from nor --to is supplied,
     # compute today / 7d / 30d windows relative to now(UTC) and render three
     # stacked rich panels. Explicit flags fall through to the single-period path.
-    from_date_raw: str | None = args.from_date
-    to_date_raw: str | None = args.to_date
-    if from_date_raw is None and to_date_raw is None:
+    if args.from_date is None and args.to_date is None:
         return _run_report_multi_period(args, cfg=cfg)
 
     # Original per-session report path (unchanged when either flag is passed).
@@ -472,9 +500,8 @@ def _run_report(args: argparse.Namespace) -> int:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
 
-    files = list(_expand_path_argument(args.path))
+    files = sorted(_expand_path_argument(args.path), key=lambda p: str(p))
     files = _filter_by_date(files, from_dt=from_dt, to_dt=to_dt)
-    files.sort(key=lambda p: str(p))
 
     session_reports: list[_SessionReport] = []
     exit_code = 0
@@ -484,17 +511,12 @@ def _run_report(args: argparse.Namespace) -> int:
         if report.parse_confidence < 0.9:
             exit_code = 2
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    explain = bool(args.explain)
-    if args.format == "json":
-        payload = _render_report_json(session_reports, explain=explain)
-        _write_report(output_dir / "report.json", payload)
-        sys.stdout.write(payload)
-    else:
-        payload = _render_report_markdown(session_reports, explain=explain)
-        _write_report(output_dir / "report.md", payload)
-        sys.stdout.write(payload)
-    sys.stdout.flush()
+    _emit_single_period_report(
+        session_reports,
+        output_dir,
+        fmt=args.format,
+        explain=bool(args.explain),
+    )
     return exit_code
 
 
@@ -809,29 +831,61 @@ def _filter_by_date(
     return kept
 
 
+def _parse_timestamp_from_line(line: str) -> datetime | None:
+    """Extract the ``timestamp`` field from a single JSONL line, or return ``None``."""
+    stripped = line.strip()
+    if not stripped:
+        return None
+    try:
+        parsed = json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+    raw = parsed.get("timestamp") if isinstance(parsed, dict) else None
+    if not isinstance(raw, str) or not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
 def _peek_first_event_timestamp(path: Path) -> datetime | None:
     """Read the first non-blank line of ``path`` and extract ``timestamp``."""
-
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for line in handle:
-                stripped = line.strip()
-                if not stripped:
+                if not line.strip():
                     continue
-                try:
-                    parsed = json.loads(stripped)
-                except json.JSONDecodeError:
-                    return None
-                raw = parsed.get("timestamp") if isinstance(parsed, dict) else None
-                if not isinstance(raw, str) or not raw:
-                    return None
-                try:
-                    return datetime.fromisoformat(raw.replace("Z", "+00:00"))
-                except ValueError:
-                    return None
+                return _parse_timestamp_from_line(line)
     except OSError:
         return None
     return None
+
+
+def _build_collector_instances(
+    cfg: dict[str, Any],
+    parser: SessionParser,
+    collectors: dict[str, Any],
+) -> dict[str, Any]:
+    """Instantiate and bind collectors for an offline report run.
+
+    ``parse_health`` is always first (if present); every other enabled name
+    follows. Each instance is bound to the parser's stats when the collector
+    exposes ``bind_stats``.
+    """
+    names: list[str] = ["parse_health"] if "parse_health" in collectors else []
+    for name in cfg.get("collectors", {}).get("enabled", []):
+        if name != "parse_health" and name in collectors:
+            names.append(name)
+
+    instances: dict[str, Any] = {}
+    for name in names:
+        instance = collectors[name]()
+        bind = getattr(instance, "bind_stats", None)
+        if callable(bind):
+            bind(parser.stats)
+        instances[name] = instance
+    return instances
 
 
 def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
@@ -842,25 +896,11 @@ def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
     at tick time, then snapshot once at the end. No source, no tick loop,
     no lifecycle — just parser plus collectors.
     """
-
     from codevigil.collectors import COLLECTORS  # local to avoid CLI/boot cycle
 
     session_id = path.stem
     parser = SessionParser(session_id=session_id)
-    collector_instances: dict[str, Any] = {}
-
-    names: list[str] = ["parse_health"] if "parse_health" in COLLECTORS else []
-    for name in cfg.get("collectors", {}).get("enabled", []):
-        if name == "parse_health":
-            continue
-        if name in COLLECTORS:
-            names.append(name)
-    for name in names:
-        instance = COLLECTORS[name]()
-        bind = getattr(instance, "bind_stats", None)
-        if callable(bind):
-            bind(parser.stats)
-        collector_instances[name] = instance
+    collector_instances = _build_collector_instances(cfg, parser, COLLECTORS)
 
     first_ts: datetime | None = None
     last_ts: datetime | None = None
