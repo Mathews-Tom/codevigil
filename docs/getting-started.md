@@ -8,7 +8,7 @@ A first-run walkthrough. Assumes you have already installed codevigil via `uv to
 codevigil --version
 ```
 
-If this prints `codevigil 0.2.0` (or whatever you installed), you are ready. Otherwise see [installation.md](installation.md).
+If this prints `codevigil 0.2.1` (or whatever you installed), you are ready. Otherwise see [installation.md](installation.md).
 
 ## Step 2: Look at the resolved configuration
 
@@ -73,6 +73,17 @@ The first line of every frame summarises the entire fleet:
 | `ACTIVE` / `STALE` / `EVICTED` | Lifecycle state. ACTIVE = recent activity. STALE = silent ≥ 5 min, collector state preserved. EVICTED = silent ≥ 35 min, collector state cleared. |
 
 Sessions are sorted by worst severity first (CRITICAL → WARN → OK), then by most-recently-active. The sort is stable across ticks so you don't have to track movement to spot changes.
+
+By default, the dashboard renders at most 20 session blocks per frame (`watch.display_limit = 20`). When your active set is larger, a footer line below the last block tells you how many were omitted. Raise the cap in your config file or via the env binding:
+
+```toml
+[watch]
+display_limit = 50
+```
+
+```bash
+CODEVIGIL_WATCH_DISPLAY_LIMIT=50 codevigil watch
+```
 
 ### Reading metric lines
 
