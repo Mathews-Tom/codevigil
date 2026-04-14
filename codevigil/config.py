@@ -436,57 +436,36 @@ def _check_known_path(dotted: str, *, source: str) -> None:
         )
 
 
+def _type_mismatch(dotted: str, expected: str, value: Any, *, source: str) -> ConfigError:
+    got = type(value).__name__
+    return ConfigError(
+        code="config.type_mismatch",
+        message=f"config key {dotted!r} expected {expected}, got {got} in {source}",
+        context={"key": dotted, "expected": expected, "source": source},
+    )
+
+
 def _coerce_against_default(dotted: str, value: Any, default: Any, *, source: str) -> Any:
     expected_type = type(default)
     if isinstance(default, bool):
         if not isinstance(value, bool):
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=(
-                    f"config key {dotted!r} expected bool, got {type(value).__name__} in {source}"
-                ),
-                context={"key": dotted, "expected": "bool", "source": source},
-            )
+            raise _type_mismatch(dotted, "bool", value, source=source)
         return value
     if isinstance(default, int) and not isinstance(default, bool):
         if isinstance(value, bool) or not isinstance(value, int):
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=(
-                    f"config key {dotted!r} expected int, got {type(value).__name__} in {source}"
-                ),
-                context={"key": dotted, "expected": "int", "source": source},
-            )
+            raise _type_mismatch(dotted, "int", value, source=source)
         return value
     if isinstance(default, float):
         if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=(
-                    f"config key {dotted!r} expected float, got {type(value).__name__} in {source}"
-                ),
-                context={"key": dotted, "expected": "float", "source": source},
-            )
+            raise _type_mismatch(dotted, "float", value, source=source)
         return float(value)
     if isinstance(default, str):
         if not isinstance(value, str):
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=(
-                    f"config key {dotted!r} expected str, got {type(value).__name__} in {source}"
-                ),
-                context={"key": dotted, "expected": "str", "source": source},
-            )
+            raise _type_mismatch(dotted, "str", value, source=source)
         return value
     if isinstance(default, list):
         if not isinstance(value, list):
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=(
-                    f"config key {dotted!r} expected list, got {type(value).__name__} in {source}"
-                ),
-                context={"key": dotted, "expected": "list", "source": source},
-            )
+            raise _type_mismatch(dotted, "list", value, source=source)
         # ``stop_phrase.custom_phrases`` accepts a mixed list of plain
         # strings and table entries with ``text``/``mode``/``category``/
         # ``intent`` keys. Every other list-valued config key is still
@@ -570,6 +549,45 @@ def _coerce_custom_phrase_list(dotted: str, value: list[Any], *, source: str) ->
     return out
 
 
+_BOOL_TRUE_STRINGS: frozenset[str] = frozenset({"true", "1", "yes", "on"})
+_BOOL_FALSE_STRINGS: frozenset[str] = frozenset({"false", "0", "no", "off"})
+
+
+def _parse_str_as_bool(dotted: str, raw: str, *, source: str) -> bool:
+    lowered = raw.strip().lower()
+    if lowered in _BOOL_TRUE_STRINGS:
+        return True
+    if lowered in _BOOL_FALSE_STRINGS:
+        return False
+    raise ConfigError(
+        code="config.type_mismatch",
+        message=f"config key {dotted!r} expected bool, got {raw!r} in {source}",
+        context={"key": dotted, "raw": raw, "source": source},
+    )
+
+
+def _parse_str_as_int(dotted: str, raw: str, *, source: str) -> int:
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            code="config.type_mismatch",
+            message=f"config key {dotted!r} expected int, got {raw!r} in {source}",
+            context={"key": dotted, "raw": raw, "source": source},
+        ) from exc
+
+
+def _parse_str_as_float(dotted: str, raw: str, *, source: str) -> float:
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise ConfigError(
+            code="config.type_mismatch",
+            message=f"config key {dotted!r} expected float, got {raw!r} in {source}",
+            context={"key": dotted, "raw": raw, "source": source},
+        ) from exc
+
+
 def _coerce_scalar(dotted: str, raw: Any, *, source: str) -> Any:
     default = _read_dotted_optional(CONFIG_DEFAULTS, dotted)
     if default is _MISSING:
@@ -589,123 +607,40 @@ def _coerce_scalar(dotted: str, raw: Any, *, source: str) -> Any:
     # Env / CLI raw values arrive as strings; parse them against the default
     # type so CODEVIGIL_WATCH_POLL_INTERVAL="0.5" becomes float 0.5.
     if isinstance(default, bool):
-        lowered = raw.strip().lower()
-        if lowered in {"true", "1", "yes", "on"}:
-            return True
-        if lowered in {"false", "0", "no", "off"}:
-            return False
-        raise ConfigError(
-            code="config.type_mismatch",
-            message=f"config key {dotted!r} expected bool, got {raw!r} in {source}",
-            context={"key": dotted, "raw": raw, "source": source},
-        )
+        return _parse_str_as_bool(dotted, raw, source=source)
     if isinstance(default, int) and not isinstance(default, bool):
-        try:
-            return int(raw)
-        except ValueError as exc:
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=f"config key {dotted!r} expected int, got {raw!r} in {source}",
-                context={"key": dotted, "raw": raw, "source": source},
-            ) from exc
+        return _parse_str_as_int(dotted, raw, source=source)
     if isinstance(default, float):
-        try:
-            return float(raw)
-        except ValueError as exc:
-            raise ConfigError(
-                code="config.type_mismatch",
-                message=f"config key {dotted!r} expected float, got {raw!r} in {source}",
-                context={"key": dotted, "raw": raw, "source": source},
-            ) from exc
+        return _parse_str_as_float(dotted, raw, source=source)
     if isinstance(default, list):
         # Comma-separated env / CLI form: "a,b,c".
-        items = [part.strip() for part in raw.split(",") if part.strip()]
-        return items
+        return [part.strip() for part in raw.split(",") if part.strip()]
     return raw
 
 
-def _validate_resolved(values: dict[str, Any]) -> None:
-    _validate_range(values, "watch.poll_interval", minimum=0.05, maximum=3600.0, kind="float")
-    _validate_range(values, "watch.tick_interval", minimum=0.05, maximum=3600.0, kind="float")
-    _validate_range(values, "watch.max_files", minimum=1, maximum=1_000_000, kind="int")
-    _validate_range(
-        values,
-        "watch.stale_after_seconds",
-        minimum=1,
-        maximum=86_400,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "watch.evict_after_seconds",
-        minimum=1,
-        maximum=86_400,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "watch.large_file_warn_bytes",
-        minimum=1024,
-        maximum=10**12,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "collectors.read_edit_ratio.window_size",
-        minimum=1,
-        maximum=100_000,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "collectors.read_edit_ratio.blind_edit_window",
-        minimum=1,
-        maximum=10_000,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "collectors.read_edit_ratio.blind_edit_confidence_floor",
-        minimum=0.0,
-        maximum=1.0,
-        kind="float",
-    )
-    _validate_range(
-        values,
-        "bootstrap.sessions",
-        minimum=1,
-        maximum=1_000,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "collectors.parse_health.critical_threshold",
-        minimum=0.0,
-        maximum=1.0,
-        kind="float",
-    )
-    _validate_range(
-        values,
-        "collectors.reasoning_loop.min_tool_calls_for_severity",
-        minimum=0,
-        maximum=100_000,
-        kind="int",
-    )
-    _validate_range(
-        values,
-        "collectors.read_edit_ratio.min_events_for_severity",
-        minimum=0,
-        maximum=100_000,
-        kind="int",
-    )
+# (dotted_path, minimum, maximum, kind) — iterated in _validate_resolved.
+_RANGE_CHECKS: tuple[tuple[str, float, float, str], ...] = (
+    ("watch.poll_interval", 0.05, 3600.0, "float"),
+    ("watch.tick_interval", 0.05, 3600.0, "float"),
+    ("watch.max_files", 1, 1_000_000, "int"),
+    ("watch.stale_after_seconds", 1, 86_400, "int"),
+    ("watch.evict_after_seconds", 1, 86_400, "int"),
+    ("watch.large_file_warn_bytes", 1024, 10**12, "int"),
+    ("watch.display_limit", 1, 500, "int"),
+    ("collectors.read_edit_ratio.window_size", 1, 100_000, "int"),
+    ("collectors.read_edit_ratio.blind_edit_window", 1, 10_000, "int"),
+    ("collectors.read_edit_ratio.blind_edit_confidence_floor", 0.0, 1.0, "float"),
+    ("collectors.read_edit_ratio.min_events_for_severity", 0, 100_000, "int"),
+    ("collectors.parse_health.critical_threshold", 0.0, 1.0, "float"),
+    ("collectors.reasoning_loop.min_tool_calls_for_severity", 0, 100_000, "int"),
+    ("bootstrap.sessions", 1, 1_000, "int"),
+    ("storage.min_observation_days", 1, 365, "int"),
+)
 
-    _validate_range(
-        values,
-        "watch.display_limit",
-        minimum=1,
-        maximum=500,
-        kind="int",
-    )
+
+def _validate_resolved(values: dict[str, Any]) -> None:
+    for dotted, minimum, maximum, kind in _RANGE_CHECKS:
+        _validate_range(values, dotted, minimum=minimum, maximum=maximum, kind=kind)
     _validate_stale_vs_evict(values)
     _validate_enabled_names(
         values,
@@ -721,13 +656,6 @@ def _validate_resolved(values: dict[str, Any]) -> None:
     )
     _validate_output_format(values)
     _validate_parse_health_undisableable(values)
-    _validate_range(
-        values,
-        "storage.min_observation_days",
-        minimum=1,
-        maximum=365,
-        kind="int",
-    )
 
 
 def _validate_parse_health_undisableable(values: dict[str, Any]) -> None:
