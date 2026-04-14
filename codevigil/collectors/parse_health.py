@@ -78,6 +78,7 @@ class ParseHealthCollector:
             "window_size": len(self._window),
             "total_lines": self._stats.total_lines,
             "parsed_events": self._stats.parsed_events,
+            "duplicate_count": self._stats.duplicate_count,
         }
         if is_critical:
             detail["missing_fields"] = dict(self._stats.missing_fields)
