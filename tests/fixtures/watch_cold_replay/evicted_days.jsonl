@@ -1,0 +1,9 @@
+{"type":"system","timestamp":"2026-04-10T09:00:00+00:00","session_id":"fixture-evicted-days","subtype":"session_start"}
+{"type":"user","timestamp":"2026-04-10T09:00:01+00:00","session_id":"fixture-evicted-days","message":{"content":"set up the initial project scaffolding"}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:02+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"mkdir -p src tests docs"}}]}}
+{"type":"user","timestamp":"2026-04-10T09:00:03+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":""}]}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:04+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Write","input":{"file_path":"/home/user/proj/pyproject.toml","content":"[project]\nname = \"myproject\"\nversion = \"0.1.0\"\n"}}]}}
+{"type":"user","timestamp":"2026-04-10T09:00:05+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"file written"}]}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:06+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"tool_use","id":"tool-3","name":"Write","input":{"file_path":"/home/user/proj/src/__init__.py","content":""}}]}}
+{"type":"user","timestamp":"2026-04-10T09:00:07+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"tool_result","tool_use_id":"tool-3","content":"file written"}]}}
+{"type":"assistant","timestamp":"2026-04-10T09:00:08+00:00","session_id":"fixture-evicted-days","message":{"content":[{"type":"text","text":"scaffold complete — src/, tests/, docs/ directories created with pyproject.toml"}]}}

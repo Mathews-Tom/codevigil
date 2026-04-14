@@ -1,0 +1,8 @@
+{"role":"assistant","ts":"2025-11-01T10:00:00Z","session":"drift-pre-v1-no-type","content":[{"type":"text","text":"reading the config file"}]}
+{"role":"assistant","ts":"2025-11-01T10:00:01Z","session":"drift-pre-v1-no-type","content":[{"type":"tool_use","id":"t1","name":"Read","input":{"file_path":"/home/user/config.py"}}]}
+{"role":"user","ts":"2025-11-01T10:00:02Z","session":"drift-pre-v1-no-type","content":[{"type":"tool_result","tool_use_id":"t1","content":"CONFIG = {}"}]}
+{"role":"assistant","ts":"2025-11-01T10:00:03Z","session":"drift-pre-v1-no-type","content":[{"type":"text","text":"config is empty — populating defaults"}]}
+{"role":"assistant","ts":"2025-11-01T10:00:04Z","session":"drift-pre-v1-no-type","content":[{"type":"tool_use","id":"t2","name":"Edit","input":{"file_path":"/home/user/config.py","old_string":"CONFIG = {}","new_string":"CONFIG = {\"debug\": False, \"log_level\": \"INFO\"}"}}]}
+{"role":"user","ts":"2025-11-01T10:00:05Z","session":"drift-pre-v1-no-type","content":[{"type":"tool_result","tool_use_id":"t2","content":"edit applied"}]}
+{"role":"assistant","ts":"2025-11-01T10:00:06Z","session":"drift-pre-v1-no-type","content":[{"type":"text","text":"defaults set"}]}
+{"role":"user","ts":"2025-11-01T10:00:07Z","session":"drift-pre-v1-no-type","content":[{"type":"text","text":"looks good"}]}
