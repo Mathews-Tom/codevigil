@@ -12,6 +12,14 @@ reducer group and compare ``write_precision`` alongside the primary metrics
 without requiring a separate collector or a schema change to the collector
 protocol.
 
+Per-entry date filtering: when ``from_timestamp`` or ``to_timestamp`` is
+supplied, individual :class:`~codevigil.types.Event` objects are filtered
+by ``event.timestamp`` before any collector sees them. Sessions whose
+in-window event count reaches zero after filtering are skipped entirely
+(no report emitted). ``SessionReport.started_at`` and ``ended_at`` are
+clamped to the first and last in-window event timestamps, not to the raw
+session boundaries.
+
 No network calls. No disk writes. Offline, deterministic.
 """
 
@@ -27,7 +35,7 @@ from codevigil.analysis.store import SessionReport, build_report
 from codevigil.config import CONFIG_DEFAULTS
 from codevigil.errors import CodevigilError
 from codevigil.parser import SessionParser
-from codevigil.types import MetricSnapshot
+from codevigil.types import Event, MetricSnapshot
 
 _LOG = logging.getLogger(__name__)
 
@@ -39,6 +47,8 @@ def load_reports_from_jsonl(
     paths: list[Path],
     *,
     cfg: dict[str, Any] | None = None,
+    from_timestamp: datetime | None = None,
+    to_timestamp: datetime | None = None,
 ) -> list[SessionReport]:
     """Load a :class:`~codevigil.analysis.store.SessionReport` from each path.
 
@@ -50,16 +60,29 @@ def load_reports_from_jsonl(
         cfg: Effective config dict (``ResolvedConfig.values``). When
             ``None``, built-in defaults are used so the function is safe
             to call from tests without a full config stack.
+        from_timestamp: Lower bound (inclusive) for ``event.timestamp``.
+            Events before this timestamp are dropped. When ``None``, no
+            lower bound is applied.
+        to_timestamp: Upper bound (inclusive) for ``event.timestamp``.
+            Events after this timestamp are dropped. When ``None``, no
+            upper bound is applied. The filter short-circuits once an event
+            exceeds this bound because events arrive in chronological order.
 
     Returns:
         List of :class:`~codevigil.analysis.store.SessionReport` sorted by
-        ``started_at`` ascending.
+        ``started_at`` ascending. Sessions whose in-window event count is
+        zero after filtering are omitted from the result.
     """
     effective_cfg: dict[str, Any] = cfg if cfg is not None else CONFIG_DEFAULTS
     reports: list[SessionReport] = []
     for path in paths:
         try:
-            report = _load_one(path, cfg=effective_cfg)
+            report = _load_one(
+                path,
+                cfg=effective_cfg,
+                from_timestamp=from_timestamp,
+                to_timestamp=to_timestamp,
+            )
         except Exception as exc:
             _LOG.warning("skipping %s: %s", path, exc)
             continue
@@ -74,11 +97,24 @@ def load_reports_from_jsonl(
 # ---------------------------------------------------------------------------
 
 
-def _load_one(path: Path, *, cfg: dict[str, Any]) -> SessionReport | None:
+def _load_one(
+    path: Path,
+    *,
+    cfg: dict[str, Any],
+    from_timestamp: datetime | None = None,
+    to_timestamp: datetime | None = None,
+) -> SessionReport | None:
     """Parse one JSONL session file and return a SessionReport.
 
-    Returns ``None`` when the file is empty (no events at all). Raises on
-    I/O or unrecoverable parse errors so the caller can skip and log.
+    Returns ``None`` when the file is empty (no events at all) or when all
+    events fall outside the requested ``from_timestamp``/``to_timestamp``
+    window. Raises on I/O or unrecoverable parse errors so the caller can
+    skip and log.
+
+    Events are filtered at the event pipeline level — collectors only see
+    in-window events. ``started_at``/``ended_at`` on the produced
+    ``SessionReport`` are clamped to the first/last in-window event
+    timestamps rather than the raw session boundaries.
     """
     from codevigil.collectors import COLLECTORS  # local import to avoid boot cycle
 
@@ -110,6 +146,12 @@ def _load_one(path: Path, *, cfg: dict[str, Any]) -> SessionReport | None:
     try:
         with path.open("r", encoding="utf-8", errors="replace") as handle:
             for event in parser.parse(handle):
+                if not _event_in_window(event, from_timestamp, to_timestamp):
+                    # Events arrive in chronological order; once we pass
+                    # to_timestamp no subsequent event can be in-window.
+                    if to_timestamp is not None and _event_after(event, to_timestamp):
+                        break
+                    continue
                 event_count += 1
                 if first_ts is None:
                     first_ts = event.timestamp
@@ -155,6 +197,34 @@ def _load_one(path: Path, *, cfg: dict[str, Any]) -> SessionReport | None:
         parse_confidence=float(parser.stats.parse_confidence),
         metrics=metrics,
     )
+
+
+def _event_in_window(
+    event: Event,
+    from_timestamp: datetime | None,
+    to_timestamp: datetime | None,
+) -> bool:
+    """Return True when *event* falls within the requested time window.
+
+    Comparison is done in UTC-normalised wall-clock time by stripping
+    tzinfo so that naive and aware datetimes from the CLI can be compared
+    consistently. The parser always emits timezone-aware timestamps; the
+    CLI may supply naive datetimes (from date-only strings) or aware ones.
+    """
+    ts = event.timestamp.replace(tzinfo=None)
+    if from_timestamp is not None and ts < from_timestamp.replace(tzinfo=None):
+        return False
+    return not (to_timestamp is not None and ts > to_timestamp.replace(tzinfo=None))
+
+
+def _event_after(event: Event, to_timestamp: datetime) -> bool:
+    """Return True when *event* is strictly after *to_timestamp*.
+
+    Used for the chronological short-circuit inside the ingest loop: once an
+    event's timestamp exceeds the upper bound, all remaining events will also
+    exceed it, so the loop can break early.
+    """
+    return event.timestamp.replace(tzinfo=None) > to_timestamp.replace(tzinfo=None)
 
 
 def _inject_write_precision(
