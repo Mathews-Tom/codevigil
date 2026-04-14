@@ -35,6 +35,7 @@ The default config tree has these top-level sections:
 | `large_file_warn_bytes` | `int`   | `10 * 1024 * 1024`   | Per-poll growth above this triggers a single WARN per file per run. Range: `[1024, 10**12]`.                                                                                           |
 | `stale_after_seconds`   | `int`   | `300`                | A session silent for this long transitions to STALE. Collector state is preserved. Range: `[1, 86400]`.                                                                                |
 | `evict_after_seconds`   | `int`   | `2100`               | A session silent for this long is EVICTED. `reset()` is called on every collector and the cursor is dropped. Must be strictly greater than `stale_after_seconds`. Range: `[1, 86400]`. |
+| `display_limit`         | `int`   | `20`                 | Maximum number of session blocks rendered per frame in `watch` mode. Sessions are ranked by severity then recency; only the top `display_limit` entries are shown. A footer line reports how many were omitted. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`. |
 
 ### Watch lifecycle
 
@@ -222,6 +223,7 @@ Only the keys in this map can be overridden via the environment. Every other key
 | `CODEVIGIL_WATCH_ROOT`           | `watch.root`           |
 | `CODEVIGIL_WATCH_POLL_INTERVAL`  | `watch.poll_interval`  |
 | `CODEVIGIL_WATCH_TICK_INTERVAL`  | `watch.tick_interval`  |
+| `CODEVIGIL_WATCH_DISPLAY_LIMIT`  | `watch.display_limit`  |
 | `CODEVIGIL_REPORT_OUTPUT_DIR`    | `report.output_dir`    |
 | `CODEVIGIL_REPORT_OUTPUT_FORMAT` | `report.output_format` |
 | `CODEVIGIL_BOOTSTRAP_SESSIONS`   | `bootstrap.sessions`   |

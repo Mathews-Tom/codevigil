@@ -247,3 +247,124 @@ def test_classifier_unknown_key_rejected(tmp_path: Path) -> None:
         load_config(config_path=path, env={}, cli_overrides={})
     assert exc.value.code == "config.unknown_key"
     assert "classifier.unknown_option" in exc.value.message
+
+
+# ---------------------------------------------------------------------------
+# watch.display_limit validation
+# ---------------------------------------------------------------------------
+
+
+def test_display_limit_default_is_20() -> None:
+    cfg = load_config(config_path=None, env={}, cli_overrides={})
+    assert cfg.values["watch"]["display_limit"] == 20
+
+
+def test_display_limit_boundary_one_accepted(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        display_limit = 1
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    assert cfg.values["watch"]["display_limit"] == 1
+
+
+def test_display_limit_boundary_500_accepted(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        display_limit = 500
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    assert cfg.values["watch"]["display_limit"] == 500
+
+
+def test_display_limit_zero_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        display_limit = 0
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.out_of_range"
+    assert "watch.display_limit" in exc.value.message
+
+
+def test_display_limit_negative_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        display_limit = -1
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.out_of_range"
+
+
+def test_display_limit_501_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        display_limit = 501
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.out_of_range"
+
+
+def test_display_limit_string_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        display_limit = "twenty"
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.type_mismatch"
+    assert "watch.display_limit" in exc.value.message
+
+
+def test_display_limit_env_binding_accepted() -> None:
+    cfg = load_config(
+        config_path=None,
+        env={"CODEVIGIL_WATCH_DISPLAY_LIMIT": "50"},
+        cli_overrides={},
+    )
+    assert cfg.values["watch"]["display_limit"] == 50
+
+
+def test_display_limit_env_binding_invalid_string_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        load_config(
+            config_path=None,
+            env={"CODEVIGIL_WATCH_DISPLAY_LIMIT": "twenty"},
+            cli_overrides={},
+        )
+    assert exc.value.code == "config.type_mismatch"
+
+
+def test_existing_config_without_display_limit_loads_unchanged(tmp_path: Path) -> None:
+    """A config file that predates display_limit loads with the default value."""
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        poll_interval = 3.0
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    assert cfg.values["watch"]["display_limit"] == 20
+    assert cfg.values["watch"]["poll_interval"] == 3.0

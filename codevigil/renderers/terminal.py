@@ -25,8 +25,9 @@ from __future__ import annotations
 import contextlib
 import sys
 from collections import defaultdict
+from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TextIO
 
 import rich.console
@@ -128,10 +129,14 @@ class TerminalRenderer:
         show_experimental_badge: bool = True,
         use_color: bool = True,
         baseline_store: SessionStore | None = None,
+        display_limit: int = 20,
+        clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
         self._stream: TextIO = stream if stream is not None else sys.stdout
         self._use_color = use_color
         self._show_experimental_badge = show_experimental_badge
+        self._display_limit: int = display_limit
+        self._clock: Callable[[], datetime] = clock
         self._console = self._make_console()
 
         self._blocks: dict[str, _SessionBlock] = {}
@@ -183,8 +188,6 @@ class TerminalRenderer:
         # Compute fleet-level counters.
         projects: set[str] = set()
         crit = warn = ok = 0
-        latest_ts: float = 0.0
-        latest_dt: datetime | None = None
 
         for block in self._blocks.values():
             if block.severity_rank == _SEVERITY_RANK[Severity.CRITICAL]:
@@ -193,9 +196,6 @@ class TerminalRenderer:
                 warn += 1
             else:
                 ok += 1
-            if block.updated_at_ts > latest_ts:
-                latest_ts = block.updated_at_ts
-                latest_dt = block.updated_dt
             if block.project_key:
                 projects.add(block.project_key)
 
@@ -204,7 +204,6 @@ class TerminalRenderer:
         self._fleet_warn = warn
         self._fleet_ok = ok
         self._fleet_projects = len(projects)
-        self._fleet_updated = latest_dt
 
         sorted_ids = sorted(
             self._order,
@@ -214,6 +213,15 @@ class TerminalRenderer:
                 sid,
             ),
         )
+
+        # Cap the rendered set to display_limit; track totals for the footer.
+        total_active = len(sorted_ids)
+        sorted_ids = sorted_ids[: self._display_limit]
+        shown = len(sorted_ids)
+
+        # Wall-clock render time — set unconditionally so the header ticks
+        # forward every frame even when no events arrived.
+        self._fleet_updated = self._clock()
 
         # Rebuild Console from stream each tick so external stream swaps
         # in tests are respected (self._stream is always the current target).
@@ -234,6 +242,15 @@ class TerminalRenderer:
                 renderables.append(block.metric_table)
             renderables.append(rich.rule.Rule(style="dim"))
             renderables.extend(block.footer_items)
+
+        if total_active > shown:
+            renderables.append(
+                rich.text.Text(
+                    f"\u2026 showing {shown} of {total_active} active sessions."
+                    " Increase watch.display_limit to see more.",
+                    style=_DIM_STYLE,
+                )
+            )
 
         self._console.print(rich.console.Group(*renderables))
         self._blocks = {}

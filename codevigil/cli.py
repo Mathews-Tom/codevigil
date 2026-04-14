@@ -269,6 +269,7 @@ def _run_watch(args: argparse.Namespace) -> int:
     renderer = TerminalRenderer(
         show_experimental_badge=show_badge,
         baseline_store=baseline_store,
+        display_limit=int(watch_cfg["display_limit"]),
     )
     explain = bool(args.explain)
 
