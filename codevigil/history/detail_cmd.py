@@ -3,9 +3,15 @@
 Renders a single ``SessionReport`` with:
 
 1. Header block — session id, project, model, permission_mode, started_at,
-   duration, final severity.
+   duration, final severity. When the classifier is enabled and the session
+   carries a task type, the header also shows the session-level task label
+   with an ``[experimental]`` badge.
 2. Metric trajectory — for each metric, shows the final value and severity.
-3. Stop-phrase context snippets — reads ``recent_hits[].context_snippet``
+3. Turn timeline — when the session carries per-turn task type data, renders
+   one heading per turn annotated with its task type label. Each heading
+   carries an ``[experimental]`` badge adjacent to the label. This section
+   is absent when no turn data is available.
+4. Stop-phrase context snippets — reads ``recent_hits[].context_snippet``
    from the ``stop_phrase`` metric detail when present.
 
 Uses ``rich`` throughout: panels for sections, a table for the metric rows.
@@ -18,8 +24,10 @@ from pathlib import Path
 from typing import Any
 
 import rich.console
+import rich.markup
 import rich.panel
 import rich.table
+import rich.text
 
 from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.history.filters import (
@@ -31,11 +39,15 @@ from codevigil.history.filters import (
 
 _SEV_STYLE: dict[str, str] = {"ok": "green", "warn": "yellow", "crit": "red"}
 
+# Badge for experimental classifier output (escaped for Rich markup).
+_EXPERIMENTAL_BADGE: str = rich.markup.escape("[experimental]")
+
 
 def run_detail(
     session_id: str,
     *,
     store_dir: Path | None = None,
+    classifier_experimental: bool = True,
     out: Any = None,
 ) -> int:
     """Render a single session from the store.
@@ -44,6 +56,9 @@ def run_detail(
         session_id: Full or partial session id. Exact match required
             against the file name in the store.
         store_dir: Override the default ``SessionStore`` directory.
+        classifier_experimental: When ``True``, per-turn task type headings
+            and the session-level task type carry an ``[experimental]`` badge.
+            Set from ``classifier.experimental`` config key.
         out: Output stream. Defaults to ``sys.stdout``.
 
     Returns:
@@ -58,17 +73,17 @@ def run_detail(
         out.write(f"session not found: {session_id!r}\n")
         return 1
 
-    _render(report, out=out)
+    _render(report, classifier_experimental=classifier_experimental, out=out)
     return 0
 
 
-def _render(report: SessionReport, *, out: Any) -> None:
+def _render(report: SessionReport, *, classifier_experimental: bool = True, out: Any) -> None:
     console = rich.console.Console(file=out, highlight=False)
 
     # --- header panel ---
     console.print(
         rich.panel.Panel(
-            "\n".join(_header_lines(report)),
+            "\n".join(_header_lines(report, classifier_experimental=classifier_experimental)),
             title=f"[bold]Session: {report.session_id}[/bold]",
             expand=False,
         )
@@ -87,6 +102,13 @@ def _render(report: SessionReport, *, out: Any) -> None:
 
     console.print(tbl)
 
+    # --- per-turn task type timeline ---
+    turn_types = report.turn_task_types
+    if turn_types is not None and len(turn_types) > 0:
+        _render_turn_timeline(
+            turn_types, classifier_experimental=classifier_experimental, console=console
+        )
+
     # --- stop-phrase snippets ---
     snippets = _extract_stop_phrase_snippets()
     if snippets:
@@ -100,10 +122,35 @@ def _render(report: SessionReport, *, out: Any) -> None:
         )
 
 
-def _header_lines(report: SessionReport) -> list[str]:
+def _render_turn_timeline(
+    turn_types: tuple[str, ...],
+    *,
+    classifier_experimental: bool,
+    console: rich.console.Console,
+) -> None:
+    """Render per-turn task type headings in the event timeline."""
+    badge = f" {_EXPERIMENTAL_BADGE}" if classifier_experimental else ""
+    lines: list[str] = []
+    for i, task_type in enumerate(turn_types):
+        # rich.markup.escape prevents Rich from interpreting [task_type] as a
+        # markup tag (which would silently swallow the text). The label is shown
+        # in the format "[exploration]" per the design note.
+        escaped_label = rich.markup.escape(f"[{task_type}]")
+        lines.append(f"  Turn {i + 1}: {escaped_label}{badge}")
+
+    console.print(
+        rich.panel.Panel(
+            "\n".join(lines),
+            title="[bold]Turn Task Types[/bold]",
+            expand=False,
+        )
+    )
+
+
+def _header_lines(report: SessionReport, *, classifier_experimental: bool) -> list[str]:
     project_display = report.project_name or report.project_hash or "—"
     worst_sev = severity_of_report(report)
-    return [
+    lines = [
         f"project: {project_display}",
         f"model: {report.model or '—'}",
         f"permission_mode: {report.permission_mode or '—'}",
@@ -113,6 +160,10 @@ def _header_lines(report: SessionReport) -> list[str]:
         f"parse_confidence: {report.parse_confidence:.4f}",
         f"severity: {worst_sev}",
     ]
+    if report.session_task_type is not None:
+        badge = f" {_EXPERIMENTAL_BADGE}" if classifier_experimental else ""
+        lines.append(f"task_type: {report.session_task_type}{badge}")
+    return lines
 
 
 def _extract_stop_phrase_snippets() -> list[str]:
