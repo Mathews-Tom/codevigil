@@ -15,6 +15,7 @@ def make_meta(
     state: SessionState = SessionState.ACTIVE,
     duration_s: float = 154.0,
     parse_confidence: float = 1.0,
+    session_task_type: str | None = None,
 ) -> SessionMeta:
     start = datetime(2026, 4, 13, 12, 0, 0, tzinfo=UTC)
     return SessionMeta(
@@ -27,6 +28,7 @@ def make_meta(
         event_count=42,
         parse_confidence=parse_confidence,
         state=state,
+        session_task_type=session_task_type,
     )
 
 
