@@ -1,0 +1,10 @@
+{"type":"system","timestamp":"2026-04-15T10:00:00+00:00","session_id":"fixture-stale","subtype":"session_start"}
+{"type":"user","timestamp":"2026-04-15T10:00:01+00:00","session_id":"fixture-stale","message":{"content":"refactor the database connection pooling"}}
+{"type":"assistant","timestamp":"2026-04-15T10:00:02+00:00","session_id":"fixture-stale","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Grep","input":{"pattern":"create_engine","path":"/home/user/proj"}}]}}
+{"type":"user","timestamp":"2026-04-15T10:00:03+00:00","session_id":"fixture-stale","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"db.py:12: engine = create_engine(URL)"}]}}
+{"type":"assistant","timestamp":"2026-04-15T10:00:04+00:00","session_id":"fixture-stale","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Read","input":{"file_path":"/home/user/proj/db.py"}}]}}
+{"type":"user","timestamp":"2026-04-15T10:00:05+00:00","session_id":"fixture-stale","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"engine = create_engine(URL)"}]}}
+{"type":"assistant","timestamp":"2026-04-15T10:00:06+00:00","session_id":"fixture-stale","message":{"content":[{"type":"text","text":"wrapping with pool_size and max_overflow"}]}}
+{"type":"assistant","timestamp":"2026-04-15T10:00:07+00:00","session_id":"fixture-stale","message":{"content":[{"type":"tool_use","id":"tool-3","name":"Edit","input":{"file_path":"/home/user/proj/db.py","old_string":"create_engine(URL)","new_string":"create_engine(URL, pool_size=10, max_overflow=20)"}}]}}
+{"type":"user","timestamp":"2026-04-15T10:00:08+00:00","session_id":"fixture-stale","message":{"content":[{"type":"tool_result","tool_use_id":"tool-3","content":"edit applied"}]}}
+{"type":"assistant","timestamp":"2026-04-15T10:00:09+00:00","session_id":"fixture-stale","message":{"content":[{"type":"text","text":"done — pool configured"}]}}

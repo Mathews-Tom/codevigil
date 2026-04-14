@@ -1,0 +1,7 @@
+{"type":"system","timestamp":"2026-04-15T11:00:00+00:00","session_id":"fixture-recently-silent","subtype":"session_start"}
+{"type":"user","timestamp":"2026-04-15T11:00:01+00:00","session_id":"fixture-recently-silent","message":{"content":"investigate the test failures in CI"}}
+{"type":"assistant","timestamp":"2026-04-15T11:00:02+00:00","session_id":"fixture-recently-silent","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Bash","input":{"command":"uv run pytest tests/ -x 2>&1 | tail -20"}}]}}
+{"type":"user","timestamp":"2026-04-15T11:00:03+00:00","session_id":"fixture-recently-silent","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"2 failed, 198 passed"}]}}
+{"type":"assistant","timestamp":"2026-04-15T11:00:04+00:00","session_id":"fixture-recently-silent","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Read","input":{"file_path":"/home/user/proj/tests/test_auth.py"}}]}}
+{"type":"user","timestamp":"2026-04-15T11:00:05+00:00","session_id":"fixture-recently-silent","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"def test_login(): ..."}]}}
+{"type":"assistant","timestamp":"2026-04-15T11:00:06+00:00","session_id":"fixture-recently-silent","message":{"content":[{"type":"text","text":"found the root cause — fixture teardown missing"}]}}

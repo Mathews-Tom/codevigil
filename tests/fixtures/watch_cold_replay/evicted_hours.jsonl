@@ -1,0 +1,7 @@
+{"type":"system","timestamp":"2026-04-15T08:00:00+00:00","session_id":"fixture-evicted-hours","subtype":"session_start"}
+{"type":"user","timestamp":"2026-04-15T08:00:01+00:00","session_id":"fixture-evicted-hours","message":{"content":"migrate the users table to add a preferences column"}}
+{"type":"assistant","timestamp":"2026-04-15T08:00:02+00:00","session_id":"fixture-evicted-hours","message":{"content":[{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/home/user/proj/migrations/001_initial.sql"}}]}}
+{"type":"user","timestamp":"2026-04-15T08:00:03+00:00","session_id":"fixture-evicted-hours","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"CREATE TABLE users (id SERIAL PRIMARY KEY, email TEXT);"}]}}
+{"type":"assistant","timestamp":"2026-04-15T08:00:04+00:00","session_id":"fixture-evicted-hours","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Write","input":{"file_path":"/home/user/proj/migrations/002_add_preferences.sql","content":"ALTER TABLE users ADD COLUMN preferences JSONB DEFAULT '{}';"}}]}}
+{"type":"user","timestamp":"2026-04-15T08:00:05+00:00","session_id":"fixture-evicted-hours","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"file written"}]}}
+{"type":"assistant","timestamp":"2026-04-15T08:00:06+00:00","session_id":"fixture-evicted-hours","message":{"content":[{"type":"text","text":"migration file created; run it with: psql $DATABASE_URL < migrations/002_add_preferences.sql"}]}}

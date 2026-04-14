@@ -1,0 +1,7 @@
+{"type":"system","timestamp":"2026-04-15T12:00:00+00:00","session_id":"fixture-fresh-active","subtype":"session_start"}
+{"type":"user","timestamp":"2026-04-15T12:00:01+00:00","session_id":"fixture-fresh-active","message":{"content":"add a new endpoint for user preferences"}}
+{"type":"assistant","timestamp":"2026-04-15T12:00:02+00:00","session_id":"fixture-fresh-active","message":{"content":[{"type":"text","text":"reading the existing routes first"},{"type":"tool_use","id":"tool-1","name":"Read","input":{"file_path":"/home/user/proj/routes.py"}}]}}
+{"type":"user","timestamp":"2026-04-15T12:00:03+00:00","session_id":"fixture-fresh-active","message":{"content":[{"type":"tool_result","tool_use_id":"tool-1","content":"@app.route('/users')"}]}}
+{"type":"assistant","timestamp":"2026-04-15T12:00:04+00:00","session_id":"fixture-fresh-active","message":{"content":[{"type":"tool_use","id":"tool-2","name":"Edit","input":{"file_path":"/home/user/proj/routes.py","old_string":"@app.route('/users')","new_string":"@app.route('/users')\n@app.route('/users/preferences')"}}]}}
+{"type":"user","timestamp":"2026-04-15T12:00:05+00:00","session_id":"fixture-fresh-active","message":{"content":[{"type":"tool_result","tool_use_id":"tool-2","content":"edit applied"}]}}
+{"type":"assistant","timestamp":"2026-04-15T12:00:06+00:00","session_id":"fixture-fresh-active","message":{"content":[{"type":"text","text":"endpoint added"}]}}
