@@ -140,7 +140,9 @@ def test_aggregator_accumulates_completed_turns_on_second_user_message(
     assert isinstance(turn, Turn)
     assert turn.user_message_text == "first prompt"
     assert turn.session_id == "sess-1"
-    assert turn.task_type is None  # Phase 5 — not populated here
+    # Phase 5: classifier is enabled by default; the turn is classified.
+    # "first prompt" with no tool calls → planning (rule 3: no edit/bash/read_glob).
+    assert turn.task_type == "planning"
 
 
 def test_aggregator_no_completed_turns_before_second_user_message(
@@ -303,8 +305,9 @@ def test_session_report_turns_populated_on_eviction(error_log: Path, tmp_path: P
     assert len(report.turns) == 2
     assert report.turns[0].user_message_text == "first"
     assert report.turns[1].user_message_text == "second"
-    # task_type is None (classifier is Phase 5)
-    assert all(t.task_type is None for t in report.turns)
+    # Phase 5: classifier is enabled by default; turns are classified.
+    # Both user messages carry text only (no tools) → planning.
+    assert all(t.task_type == "planning" for t in report.turns)
 
 
 # ---------------------------------------------------------------------------

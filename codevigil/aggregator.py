@@ -31,6 +31,7 @@ instantiates it for every session.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import time
 from collections import deque
@@ -42,6 +43,7 @@ from typing import Any
 
 from codevigil.analysis.store import SessionStore, build_report
 from codevigil.bootstrap import BootstrapManager
+from codevigil.classifier import aggregate_session_task_type, classify_turn
 from codevigil.collectors import COLLECTORS
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.parser import SessionParser
@@ -162,6 +164,8 @@ class SessionAggregator:
         collectors_cfg = config.get("collectors", {})
         enabled = collectors_cfg.get("enabled", [])
         self._enabled_collectors: tuple[str, ...] = tuple(enabled)
+        classifier_cfg = config.get("classifier", {})
+        self._classifier_enabled: bool = bool(classifier_cfg.get("enabled", True))
         # Tracks paths for which the "invalid layout" WARN has already been
         # emitted so the message fires once per distinct path per process,
         # not once per tick or per session that shares the same bad path.
@@ -402,6 +406,10 @@ class SessionAggregator:
             self._fan_out_event(ctx, event)
             completed_turn = ctx.turn_grouper.ingest(event)
             if completed_turn is not None:
+                if self._classifier_enabled:
+                    completed_turn = dataclasses.replace(
+                        completed_turn, task_type=classify_turn(completed_turn)
+                    )
                 ctx.completed_turns.append(completed_turn)
 
     def _fan_out_event(self, ctx: _SessionContext, event: Event) -> None:
@@ -634,6 +642,8 @@ class SessionAggregator:
         self._observe_for_bootstrap(ctx)
         final_turn = ctx.turn_grouper.finalize()
         if final_turn is not None:
+            if self._classifier_enabled:
+                final_turn = dataclasses.replace(final_turn, task_type=classify_turn(final_turn))
             ctx.completed_turns.append(final_turn)
         self._write_session_report(ctx)
         self._reset_collectors(ctx)
@@ -653,6 +663,14 @@ class SessionAggregator:
             # Never received any events; skip — an empty report is noise.
             return
         metrics: dict[str, float] = {name: snap.value for name, snap in snapshots.items()}
+        completed = tuple(ctx.completed_turns) if ctx.completed_turns else None
+        session_task_type: str | None = None
+        turn_task_types: tuple[str, ...] | None = None
+        if self._classifier_enabled and completed:
+            session_task_type = aggregate_session_task_type(completed)
+            turn_task_types = (
+                tuple(t.task_type for t in completed if t.task_type is not None) or None
+            )
         try:
             report = build_report(
                 session_id=ctx.session_id,
@@ -667,7 +685,9 @@ class SessionAggregator:
                 metrics=metrics,
                 eviction_churn=self._eviction_churn,
                 cohort_size=self._cohort_size,
-                turns=tuple(ctx.completed_turns) if ctx.completed_turns else None,
+                turns=completed,
+                session_task_type=session_task_type,
+                turn_task_types=turn_task_types,
             )
             self._store.write(report)
         except Exception as exc:
