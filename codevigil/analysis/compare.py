@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import math
 import statistics
+from collections import defaultdict
 from dataclasses import dataclass
 
 from codevigil.analysis.store import SessionReport
@@ -149,13 +150,11 @@ def compare_periods(
 
 def _collect_metric_values(reports: list[SessionReport]) -> dict[str, list[float]]:
     """Collect per-metric value lists from a list of session reports."""
-    out: dict[str, list[float]] = {}
+    out: defaultdict[str, list[float]] = defaultdict(list)
     for report in reports:
         for metric_name, value in report.metrics.items():
-            if metric_name not in out:
-                out[metric_name] = []
             out[metric_name].append(value)
-    return out
+    return dict(out)
 
 
 def _compare_metric(
@@ -292,14 +291,16 @@ def _beta_cf(x: float, a: float, b: float) -> float:
     eps = 3.0e-7
     fp_min = 1.0e-30
 
+    def _clamp(v: float) -> float:
+        """Prevent underflow to zero in the Lentz iteration."""
+        return fp_min if abs(v) < fp_min else v
+
     qab = a + b
     qap = a + 1.0
     qam = a - 1.0
 
     c = 1.0
-    d = 1.0 - qab * x / qap
-    if abs(d) < fp_min:
-        d = fp_min
+    d = _clamp(1.0 - qab * x / qap)
     d = 1.0 / d
     h = d
 
@@ -307,23 +308,15 @@ def _beta_cf(x: float, a: float, b: float) -> float:
         m2 = 2 * m
         # Even step
         aa = m * (b - m) * x / ((qam + m2) * (a + m2))
-        d = 1.0 + aa * d
-        if abs(d) < fp_min:
-            d = fp_min
-        c = 1.0 + aa / c
-        if abs(c) < fp_min:
-            c = fp_min
+        d = _clamp(1.0 + aa * d)
+        c = _clamp(1.0 + aa / c)
         d = 1.0 / d
         h *= d * c
 
         # Odd step
         aa = -(a + m) * (qab + m) * x / ((a + m2) * (qap + m2))
-        d = 1.0 + aa * d
-        if abs(d) < fp_min:
-            d = fp_min
-        c = 1.0 + aa / c
-        if abs(c) < fp_min:
-            c = fp_min
+        d = _clamp(1.0 + aa * d)
+        c = _clamp(1.0 + aa / c)
         d = 1.0 / d
         delta = d * c
         h *= delta
