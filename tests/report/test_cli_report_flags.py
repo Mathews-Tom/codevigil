@@ -293,8 +293,9 @@ class TestOriginalReportPathUnchanged:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Passing --from preserves the single-period path and produces report.json.
         home = tmp_path / "home"
-        rc = main(["report", str(corpus_dir), "--format", "json"])
+        rc = main(["report", str(corpus_dir), "--format", "json", "--from", "2020-01-01"])
         assert rc == 0
         assert (home / "reports" / "report.json").exists()
 
@@ -304,7 +305,8 @@ class TestOriginalReportPathUnchanged:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        # Passing --from preserves the single-period path and produces report.md.
         home = tmp_path / "home"
-        rc = main(["report", str(corpus_dir), "--format", "markdown"])
+        rc = main(["report", str(corpus_dir), "--format", "markdown", "--from", "2020-01-01"])
         assert rc == 0
         assert (home / "reports" / "report.md").exists()

@@ -29,7 +29,8 @@ def test_report_json_output_is_deterministic(
     home = _setup_home(tmp_path, monkeypatch)
     fixture = write_fixture_session(home / "session.jsonl")
 
-    exit_code = main(["report", str(fixture), "--format", "json"])
+    # Pass --from to activate the single-period path (no date flags → multi-period).
+    exit_code = main(["report", str(fixture), "--format", "json", "--from", "2020-01-01"])
     assert exit_code == 0
 
     captured = capsys.readouterr().out.strip()
@@ -58,7 +59,8 @@ def test_report_markdown_golden_table(
     home = _setup_home(tmp_path, monkeypatch)
     fixture = write_fixture_session(home / "session.jsonl")
 
-    exit_code = main(["report", str(fixture), "--format", "markdown"])
+    # Pass --from to activate the single-period path (no date flags → multi-period).
+    exit_code = main(["report", str(fixture), "--format", "markdown", "--from", "2020-01-01"])
     assert exit_code == 0
 
     out = capsys.readouterr().out
@@ -73,7 +75,7 @@ def test_report_markdown_golden_table(
     # Rerun and confirm byte-identical output — the markdown path must
     # be deterministic (no timestamps, sorted sessions and metrics).
     capsys.readouterr()
-    assert main(["report", str(fixture), "--format", "markdown"]) == 0
+    assert main(["report", str(fixture), "--format", "markdown", "--from", "2020-01-01"]) == 0
     out_second = capsys.readouterr().out
     assert out_second == out
 

@@ -28,7 +28,8 @@ def test_explain_annotates_report_markdown_with_intent(
     )
 
     # Without --explain, intent must NOT appear.
-    assert main(["report", str(fixture), "--format", "markdown"]) == 0
+    # Pass --from to use the single-period path (no date flags → multi-period default).
+    assert main(["report", str(fixture), "--format", "markdown", "--from", "2020-01-01"]) == 0
     plain_out = capsys.readouterr().out
     assert "intent:" not in plain_out
 
@@ -41,6 +42,8 @@ def test_explain_annotates_report_markdown_with_intent(
                 str(fixture),
                 "--format",
                 "markdown",
+                "--from",
+                "2020-01-01",
             ]
         )
         == 0
