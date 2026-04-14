@@ -577,6 +577,11 @@ class SessionAggregator:
         history: dict[str, tuple[float, ...]] = {
             name: tuple(dq) for name, dq in ctx.snapshot_history.items()
         }
+        # Derive current session task type from completed turns when the
+        # classifier is enabled. None when disabled or no turns yet.
+        current_task_type: str | None = None
+        if self._classifier_enabled and ctx.completed_turns:
+            current_task_type = aggregate_session_task_type(ctx.completed_turns)
         return SessionMeta(
             session_id=ctx.session_id,
             project_hash=ctx.project_hash,
@@ -588,6 +593,7 @@ class SessionAggregator:
             parse_confidence=float(confidence),
             state=ctx.state,
             snapshot_history=history,
+            session_task_type=current_task_type,
         )
 
     # ----------------------------------------------------------------- lifecycle

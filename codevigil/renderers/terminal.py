@@ -336,6 +336,17 @@ class TerminalRenderer:
         t = rich.text.Text()
         t.append(f"session: {label} | project: {project} | {duration} ")
         t.append(state_word, style=state_style)
+
+        # Append task type tag right-aligned when the classifier is enabled
+        # and a task type is available. Suppressed when session_task_type is
+        # None (classifier disabled or no turns classified yet).
+        if meta.session_task_type is not None:
+            badge = " [experimental]" if self._show_experimental_badge else ""
+            t.append(
+                f"  [task: {meta.session_task_type}]{badge}",
+                style=_DIM_STYLE,
+            )
+
         return t
 
     def _build_metric_table(

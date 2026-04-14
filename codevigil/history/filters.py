@@ -111,6 +111,7 @@ def apply_filters(
     severity: SeverityLabel | None = None,
     model: str | None = None,
     permission_mode: str | None = None,
+    task_type: str | None = None,
     thresholds: dict[str, tuple[float, float]] | None = None,
 ) -> list[SessionReport]:
     """Return the subset of ``reports`` matching all supplied predicates.
@@ -118,6 +119,10 @@ def apply_filters(
     All predicates are ANDed together. Omitting a predicate (``None``)
     means no filtering on that dimension. Date comparisons are calendar-date
     only (timezone is stripped from ``started_at``).
+
+    ``task_type`` filters to sessions whose ``session_task_type`` matches
+    the given label exactly. Sessions with ``session_task_type = None``
+    never match a non-None ``task_type`` filter.
     """
     result: list[SessionReport] = []
     for report in reports:
@@ -134,6 +139,8 @@ def apply_filters(
         if permission_mode is not None and report.permission_mode != permission_mode:
             continue
         if severity is not None and severity_of_report(report, thresholds=thresholds) != severity:
+            continue
+        if task_type is not None and report.session_task_type != task_type:
             continue
         result.append(report)
     return result
