@@ -29,7 +29,7 @@ import sys
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -447,7 +447,15 @@ def _run_report(args: argparse.Namespace) -> int:
     if compare_periods_arg is not None:
         return _run_report_compare_periods(args, cfg=cfg, raw_periods=compare_periods_arg)
 
-    # Original per-session report path (unchanged).
+    # Multi-period default path: when neither --from nor --to is supplied,
+    # compute today / 7d / 30d windows relative to now(UTC) and render three
+    # stacked rich panels. Explicit flags fall through to the single-period path.
+    from_date_raw: str | None = args.from_date
+    to_date_raw: str | None = args.to_date
+    if from_date_raw is None and to_date_raw is None:
+        return _run_report_multi_period(args, cfg=cfg)
+
+    # Original per-session report path (unchanged when either flag is passed).
     from_dt = _parse_date_filter(args.from_date, end_of_day=False)
     to_dt = _parse_date_filter(args.to_date, end_of_day=True)
     if from_dt is None and args.from_date is not None:
@@ -586,6 +594,96 @@ def _run_report_compare_periods(
     sys.stdout.write(payload)
     sys.stdout.flush()
     return 0
+
+
+def _run_report_multi_period(
+    args: argparse.Namespace,
+    *,
+    cfg: dict[str, Any],
+) -> int:
+    """Run the multi-period default report (today / 7d / 30d).
+
+    Called when ``codevigil report PATH`` is invoked without ``--from`` or
+    ``--to``. Computes three windows relative to ``datetime.now(tz=UTC)``,
+    loads reports for each window via
+    :func:`~codevigil.report.loader.load_reports_for_windows`, and renders
+    via :func:`~codevigil.report.renderer.render_multi_period`.
+
+    JSON output (``--format json``) emits an object with three top-level
+    keys ``{"today": [...], "7d": [...], "30d": [...]}``. Each value is a
+    list of per-session dicts using the same schema as single-period JSON.
+    Empty periods emit an empty list ``[]`` in JSON and "no sessions in
+    period" in text mode.
+
+    The single-period path is not touched by this function; passing either
+    ``--from`` or ``--to`` bypasses this function entirely.
+    """
+    from codevigil.report.loader import expand_to_jsonl_paths, load_reports_for_windows
+    from codevigil.report.renderer import render_multi_period
+
+    try:
+        output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
+        return 2
+
+    now = datetime.now(tz=UTC)
+    midnight_today = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+    windows: list[tuple[str, datetime, datetime]] = [
+        ("today", midnight_today, now),
+        ("7d", now - timedelta(days=7), now),
+        ("30d", now - timedelta(days=30), now),
+    ]
+
+    paths = expand_to_jsonl_paths(args.path)
+    period_reports = load_reports_for_windows(paths, windows, cfg=cfg)
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fmt: str = getattr(args, "format", "json")
+
+    if fmt == "json":
+        payload = _render_multi_period_json(period_reports)
+        _write_report(output_dir / "report_multi_period.json", payload)
+        sys.stdout.write(payload)
+    else:
+        payload = render_multi_period(period_reports)
+        _write_report(output_dir / "report_multi_period.txt", payload)
+        sys.stdout.write(payload)
+
+    sys.stdout.flush()
+    return 0
+
+
+def _render_multi_period_json(
+    period_reports: dict[str, Any],
+) -> str:
+    """Render the multi-period report as a JSON object.
+
+    Emits ``{"today": [...], "7d": [...], "30d": [...]}`` where each value
+    is a list of per-session objects using the same field set as the
+    single-period JSON path. Empty periods emit ``[]``.
+    """
+    from codevigil.analysis.store import SessionReport
+
+    out: dict[str, Any] = {}
+    for label, reports in period_reports.items():
+        session_list: list[dict[str, Any]] = []
+        for report in reports:
+            if not isinstance(report, SessionReport):
+                continue
+            session_list.append(
+                {
+                    "session_id": report.session_id,
+                    "started_at": report.started_at.isoformat(),
+                    "ended_at": report.ended_at.isoformat(),
+                    "event_count": report.event_count,
+                    "parse_confidence": report.parse_confidence,
+                    "metrics": {k: v for k, v in sorted(report.metrics.items())},
+                }
+            )
+        out[label] = session_list
+    return json.dumps(out, sort_keys=True) + "\n"
 
 
 def _parse_date_only(value: str | None) -> date | None:

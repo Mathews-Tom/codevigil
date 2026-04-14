@@ -279,7 +279,47 @@ def _expand(raw: str) -> Iterator[Path]:
                 yield p
 
 
+def load_reports_for_windows(
+    paths: list[Path],
+    windows: list[tuple[str, datetime, datetime]],
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> dict[str, list[SessionReport]]:
+    """Load session reports for a list of named time windows.
+
+    Calls :func:`load_reports_from_jsonl` once per window and returns results
+    keyed by the window label. The same ``paths`` list is reused for every
+    window; no duplicate parse logic is introduced — the existing per-entry
+    filtering machinery does the work.
+
+    Parameters:
+        paths: Absolute paths to ``*.jsonl`` session files. Shared across all
+            windows.
+        windows: Ordered list of ``(label, from_timestamp, to_timestamp)``
+            tuples. Each label becomes a key in the returned dict. Labels must
+            be unique; later entries silently overwrite earlier ones with
+            identical labels.
+        cfg: Effective config dict. When ``None``, built-in defaults are used.
+
+    Returns:
+        ``dict`` mapping each window label to a (possibly empty) list of
+        :class:`~codevigil.analysis.store.SessionReport` objects sorted by
+        ``started_at``. Empty lists indicate no sessions fell within the window;
+        the key is still present so callers can detect and render the empty case.
+    """
+    result: dict[str, list[SessionReport]] = {}
+    for label, from_ts, to_ts in windows:
+        result[label] = load_reports_from_jsonl(
+            paths,
+            cfg=cfg,
+            from_timestamp=from_ts,
+            to_timestamp=to_ts,
+        )
+    return result
+
+
 __all__ = [
     "expand_to_jsonl_paths",
+    "load_reports_for_windows",
     "load_reports_from_jsonl",
 ]

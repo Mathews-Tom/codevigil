@@ -34,9 +34,15 @@ This module is a critical-path renderer per test-standards.md and requires
 
 from __future__ import annotations
 
+import io
 from collections import defaultdict
+from collections.abc import Mapping, Sequence
 from datetime import date
 from typing import Any
+
+import rich.console
+import rich.panel
+import rich.text
 
 from codevigil.analysis.cohort import (
     CohortCell,
@@ -98,6 +104,95 @@ _METRIC_DEFINITIONS: dict[str, str] = {
         "analysis. Null when no write or edit tool calls were observed."
     ),
 }
+
+
+# ---------------------------------------------------------------------------
+# Public API: multi-period summary (today / 7d / 30d default view)
+# ---------------------------------------------------------------------------
+
+# Label display names for the multi-period panels.
+_PERIOD_DISPLAY: dict[str, str] = {
+    "today": "Today",
+    "7d": "Last 7 days",
+    "30d": "Last 30 days",
+}
+
+# Canonical panel order.
+_PERIOD_ORDER: tuple[str, ...] = ("today", "7d", "30d")
+
+
+def render_multi_period(
+    reports: Mapping[str, Sequence[SessionReport]],
+) -> str:
+    """Render three stacked rich panels for the multi-period default view.
+
+    Each key in *reports* maps a period label (e.g. ``"today"``, ``"7d"``,
+    ``"30d"``) to a sequence of :class:`~codevigil.analysis.store.SessionReport`
+    objects. Any label present in *reports* that is not in the canonical order
+    ``("today", "7d", "30d")`` is appended after them in insertion order.
+
+    Panels are rendered top-to-bottom. Empty sequences (no sessions in the
+    period) render as a short "no sessions in period" line rather than an
+    empty panel, so the user always sees three labelled sections.
+
+    The output is captured from a Rich console into a string and returned.
+    The caller is responsible for writing to stdout.
+
+    Parameters:
+        reports: Mapping from period label to a sequence of session reports.
+
+    Returns:
+        A string with three stacked Rich panels separated by newlines.
+    """
+    buf = io.StringIO()
+    console = rich.console.Console(file=buf, highlight=False)
+
+    # Determine panel order: canonical labels first, then any extras.
+    extra_labels = [k for k in reports if k not in _PERIOD_ORDER]
+    ordered_labels = [k for k in _PERIOD_ORDER if k in reports] + extra_labels
+
+    for label in ordered_labels:
+        period_reports = reports[label]
+        display_name = _PERIOD_DISPLAY.get(label, label)
+        panel_content = _render_period_panel_content(period_reports)
+        panel = rich.panel.Panel(
+            panel_content,
+            title=f"[bold]{display_name}[/bold]",
+            expand=True,
+        )
+        console.print(panel)
+
+    return buf.getvalue()
+
+
+def _render_period_panel_content(
+    period_reports: Sequence[SessionReport],
+) -> rich.text.Text | str:
+    """Render the body content for a single period panel.
+
+    Returns a :class:`rich.text.Text` with one line per session showing
+    session id, event count, and key metrics. When the sequence is empty,
+    returns the sentinel string "no sessions in period".
+    """
+    if not period_reports:
+        return "no sessions in period"
+
+    text = rich.text.Text()
+    for i, report in enumerate(period_reports):
+        if i > 0:
+            text.append("\n")
+        # Session id and event count.
+        text.append(report.session_id, style="bold cyan")
+        text.append(f"  events: {report.event_count}")
+        # Surface a few key metrics when available.
+        metric_parts: list[str] = []
+        for metric_name in ("read_edit_ratio", "stop_phrase", "reasoning_loop", "parse_health"):
+            value = report.metrics.get(metric_name)
+            if value is not None:
+                metric_parts.append(f"{metric_name}: {value:.2f}")
+        if metric_parts:
+            text.append("  " + "  ".join(metric_parts))
+    return text
 
 
 # ---------------------------------------------------------------------------
@@ -619,4 +714,5 @@ __all__ = [
     "BANNED_CAUSAL_WORDS",
     "render_compare_periods_report",
     "render_group_by_report",
+    "render_multi_period",
 ]

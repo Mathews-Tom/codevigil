@@ -121,7 +121,13 @@ codevigil report PATH [--from YYYY-MM-DD] [--to YYYY-MM-DD]
                       [--compare-periods A_START:A_END,B_START:B_END]
 ```
 
-Batch analysis over one or more session files. With no cohort flags, walks the input, parses each file, runs every enabled collector, and writes a deterministic per-session report. With `--group-by` or `--compare-periods`, produces a Markdown cohort report instead.
+Batch analysis over one or more session files.
+
+**Default behavior (no `--from`/`--to` flags).** When neither `--from` nor `--to` is supplied, `report` runs in multi-period mode: it computes three windows relative to `datetime.now(UTC)` — `today` (midnight today → now), `7d` (now − 7 days → now), and `30d` (now − 30 days → now) — and renders three stacked summaries, one per period. JSON output is a single object with three top-level keys: `{"today": [...], "7d": [...], "30d": [...]}`. Periods that contain no sessions render as an empty list `[]` in JSON mode and as a "no sessions in period" line in text mode. The output file is written to `report_multi_period.json` (or `report_multi_period.txt` for markdown) in the output directory.
+
+**Single-period mode.** Passing either `--from` or `--to` (or both) bypasses multi-period mode and restores the original per-session report path. The output format and file names (`report.json` / `report.md`) are unchanged from prior versions. Scripts and CI pipelines that relied on the previous default behavior should add `--from 1970-01-01` to explicitly request single-period mode.
+
+With `--group-by` or `--compare-periods`, produces a Markdown cohort report instead of a session report (multi-period mode is also bypassed by these flags).
 
 ### Positional argument
 
@@ -142,31 +148,50 @@ Batch analysis over one or more session files. With no cohort flags, walks the i
 
 > **Note on `--from`/`--to` granularity.** These flags operate at the individual event timestamp, not at the session boundary. A session that runs from 23:50 to 00:10 across midnight will appear in both `--to 2026-01-01` (pre-midnight events only) and `--from 2026-01-02` (post-midnight events only) reports, each with a clamped `started_at`/`ended_at` that reflects the in-window portion. This behaviour differs from prior versions, which dropped or kept entire sessions based on the session's first event timestamp. Reports generated with narrow date windows over sessions that straddle those windows will show different (lower) event counts and metric values than reports with no date filter.
 
-### JSON output shape
+### JSON output shape — multi-period (default, no `--from`/`--to`)
 
 ```json
 {
-  "kind": "report",
-  "generated_at_session_count": 12,
-  "sessions": [
+  "30d": [
     {
+      "ended_at": "2026-04-14T10:02:00+00:00",
+      "event_count": 3,
+      "metrics": {
+        "parse_health": 1.0,
+        "read_edit_ratio": 1.0
+      },
+      "parse_confidence": 1.0,
       "session_id": "abc123",
-      "project_hash": "fixture-1",
-      "project_name": "my-project",
-      "metrics": [
-        {
-          "name": "read_edit_ratio",
-          "value": 5.2,
-          "label": "R:E 5.2 | research:mut 7.1",
-          "severity": "ok",
-          "detail": {
-            "research_mutation_ratio": 7.1,
-            "blind_edit_rate": 0.0,
-            "tracking_confidence": 1.0,
-            "experimental": true
-          }
-        }
-      ]
+      "started_at": "2026-04-14T10:00:00+00:00"
+    }
+  ],
+  "7d": [ ... ],
+  "today": []
+}
+```
+
+The top-level keys are always `today`, `7d`, and `30d`. Each value is a list of session objects sorted by `started_at`. An empty period produces an empty list `[]`. Top-level keys are emitted via `json.dumps(..., sort_keys=True)`.
+
+### JSON output shape — single-period (`--from` or `--to` supplied)
+
+```json
+{
+  "kind": "session_report",
+  "session_id": "abc123",
+  "event_count": 4,
+  "parse_confidence": 1.0,
+  "metrics": [
+    {
+      "name": "read_edit_ratio",
+      "value": 5.2,
+      "label": "R:E 5.2 | research:mut 7.1",
+      "severity": "ok",
+      "detail": {
+        "research_mutation_ratio": 7.1,
+        "blind_edit_rate": 0.0,
+        "tracking_confidence": 1.0,
+        "experimental": true
+      }
     }
   ]
 }
@@ -285,11 +310,14 @@ The non-zero exit on parse_health degradation is intentional: it lets shell scri
 ### Examples
 
 ```bash
+# Multi-period default: today / 7d / 30d panels (no --from or --to)
 codevigil report ~/.claude/projects
 codevigil report ~/.claude/projects --format markdown
+
+# Single-period mode: pass --from or --to to restore per-session output
 codevigil report sessions/ --from 2026-04-01 --to 2026-04-30
 codevigil report 'sessions/*.jsonl' --format json --output ~/reports
-codevigil --explain report sessions/ --format markdown
+codevigil --explain report sessions/ --format markdown --from 2020-01-01
 
 # Cohort trend — group by ISO week
 codevigil report ~/.claude/projects --group-by week
