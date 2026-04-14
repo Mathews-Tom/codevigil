@@ -86,6 +86,12 @@ class SessionMeta:
     names; values are tuples of up to three floats in chronological order
     (oldest first). The field defaults to an empty dict so existing callers
     and tests that construct ``SessionMeta`` without it continue to work.
+
+    ``session_task_type`` is the classifier-derived session-level task label
+    (one of ``TASK_CATEGORIES`` from ``codevigil.classifier``), or ``None``
+    when the classifier is disabled or no turns have been classified yet.
+    This field defaults to ``None`` so existing callers that construct
+    ``SessionMeta`` directly continue to work unchanged.
     """
 
     session_id: str
@@ -98,6 +104,7 @@ class SessionMeta:
     parse_confidence: float
     state: SessionState
     snapshot_history: dict[str, tuple[float, ...]] = field(default_factory=dict)
+    session_task_type: str | None = None
 
 
 @runtime_checkable
