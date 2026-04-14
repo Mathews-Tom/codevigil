@@ -69,6 +69,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from codevigil.turns import Turn
+
 _LOG = logging.getLogger(__name__)
 
 # Current schema version. Increment when adding or removing fields from the
@@ -208,6 +210,19 @@ class SessionReport:
     def cohort_size(self) -> int:
         return int(self._data.get("cohort_size", 0))
 
+    @property
+    def turns(self) -> tuple[Turn, ...] | None:
+        """Completed turns for this session, or ``None`` when not recorded.
+
+        ``None`` is returned for records written before Phase 4 (no ``turns``
+        key present) or when the session had no turns to record. Callers must
+        treat ``None`` and an empty tuple as equivalent "no turn data" states.
+        """
+        raw = self._data.get("turns")
+        if raw is None:
+            return None
+        return tuple(_deserialise_turn(t) for t in raw)
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable copy of the underlying data."""
         return dict(self._data)
@@ -232,11 +247,17 @@ def build_report(
     metrics: dict[str, float],
     eviction_churn: int = 0,
     cohort_size: int = 0,
+    turns: tuple[Turn, ...] | None = None,
 ) -> SessionReport:
     """Construct a :class:`SessionReport` from aggregator-supplied values.
 
     This is the intended construction path for the aggregator's ingest path.
     Tests may also call it directly with synthetic data.
+
+    The ``turns`` parameter is optional (default ``None``). When supplied it is
+    serialised to a list of dicts inside the JSON blob. Pre-upgrade records
+    that lack the ``turns`` key read back with ``SessionReport.turns == None``
+    — no migration is required.
     """
     duration = (ended_at - started_at).total_seconds()
     data: dict[str, Any] = {
@@ -255,6 +276,8 @@ def build_report(
         "eviction_churn": eviction_churn,
         "cohort_size": cohort_size,
     }
+    if turns is not None:
+        data["turns"] = [_serialise_turn(t) for t in turns]
     _validate_record(data)
     return SessionReport(data)
 
@@ -437,6 +460,34 @@ def _validate_record(record: dict[str, Any]) -> None:
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
+
+def _serialise_turn(turn: Turn) -> dict[str, Any]:
+    """Convert a :class:`~codevigil.turns.Turn` to a JSON-serialisable dict."""
+    return {
+        "session_id": turn.session_id,
+        "started_at": turn.started_at.isoformat(),
+        "ended_at": turn.ended_at.isoformat(),
+        "user_message_text": turn.user_message_text,
+        "tool_calls": list(turn.tool_calls),
+        "event_count": turn.event_count,
+        "task_type": turn.task_type,
+    }
+
+
+def _deserialise_turn(raw: Any) -> Turn:
+    """Reconstruct a :class:`~codevigil.turns.Turn` from a stored dict."""
+    if not isinstance(raw, dict):
+        raise StoreError(f"turn entry must be a dict, got {type(raw).__name__}")
+    return Turn(
+        session_id=str(raw["session_id"]),
+        started_at=_parse_dt(raw["started_at"]),
+        ended_at=_parse_dt(raw["ended_at"]),
+        user_message_text=str(raw.get("user_message_text", "")),
+        tool_calls=tuple(str(t) for t in raw.get("tool_calls", [])),
+        event_count=int(raw.get("event_count", 0)),
+        task_type=str(raw["task_type"]) if raw.get("task_type") is not None else None,
+    )
 
 
 def _default_sessions_dir() -> Path:

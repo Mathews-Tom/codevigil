@@ -46,6 +46,7 @@ from codevigil.collectors import COLLECTORS
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.parser import SessionParser
 from codevigil.projects import ProjectRegistry
+from codevigil.turns import Turn, TurnGrouper
 from codevigil.types import (
     Collector,
     Event,
@@ -99,6 +100,20 @@ class _SessionContext:
     # chronological order (oldest first). The deque is capped at 3 so
     # memory growth is O(collectors * 3) per session.
     snapshot_history: dict[str, deque[float]] = field(default_factory=dict)
+    # Turn sidecar — populated by TurnGrouper as a sidecar to collector
+    # ingestion. Collectors do NOT consume Turn; this is exposed to the
+    # classifier (Phase 5) and history detail (later phases). The grouper
+    # is initialised in __post_init__ so it receives the session_id that
+    # is already set as a required field.
+    turn_grouper: TurnGrouper = field(init=False)
+    completed_turns: list[Turn] = field(default_factory=list)
+
+    def __post_init__(self) -> None:
+        # Called automatically by the generated __init__ because slots=True
+        # dataclasses still support __post_init__. Sets turn_grouper, which
+        # cannot be provided via a default_factory because it depends on the
+        # session_id required field.
+        self.turn_grouper = TurnGrouper(self.session_id)
 
 
 _ClockFn = Callable[[], float]
@@ -385,6 +400,9 @@ class SessionAggregator:
             if event.kind is EventKind.SYSTEM:
                 self._project_registry.observe_system_event(ctx.project_hash, event)
             self._fan_out_event(ctx, event)
+            completed_turn = ctx.turn_grouper.ingest(event)
+            if completed_turn is not None:
+                ctx.completed_turns.append(completed_turn)
 
     def _fan_out_event(self, ctx: _SessionContext, event: Event) -> None:
         for collector_name, collector in ctx.collectors.items():
@@ -614,6 +632,9 @@ class SessionAggregator:
             )
         )
         self._observe_for_bootstrap(ctx)
+        final_turn = ctx.turn_grouper.finalize()
+        if final_turn is not None:
+            ctx.completed_turns.append(final_turn)
         self._write_session_report(ctx)
         self._reset_collectors(ctx)
 
@@ -646,6 +667,7 @@ class SessionAggregator:
                 metrics=metrics,
                 eviction_churn=self._eviction_churn,
                 cohort_size=self._cohort_size,
+                turns=tuple(ctx.completed_turns) if ctx.completed_turns else None,
             )
             self._store.write(report)
         except Exception as exc:

@@ -510,6 +510,14 @@ A STALE session that receives a new APPEND returns to ACTIVE with collector stat
 
 Drop in an `InotifySource` or `FSEventsSource` implementing the same `Source` protocol. The aggregator doesn't know or care which source is upstream. Cross-platform selection lives behind a factory function in `watcher.py`. The `PollingSource` remains as a universal fallback.
 
+### Turn Sidecar
+
+The aggregator maintains a `TurnGrouper` inside each `_SessionContext` as a sidecar to collector ingestion. A **turn** is one user message plus the assistant's complete response (thinking blocks, tool calls, tool results, and the final assistant message), up to the next user message or session close. The grouper is a state machine: it opens a turn on each `USER_MESSAGE` event and closes it when the next `USER_MESSAGE` arrives or when `finalize()` is called at eviction time.
+
+Completed turns are accumulated in `_SessionContext.completed_turns` as immutable `Turn` dataclass instances. Each `Turn` records the session ID, start/end timestamps, the user message text, the ordered sequence of canonical tool names called within the turn, and the total event count. A `task_type: str | None` field is reserved for the Phase 5 classifier; it is always `None` until classification runs.
+
+Collectors continue to receive raw `Event` objects — they do not consume `Turn`. The Turn sidecar is exposed only to the classifier (Phase 5) and to future `history detail` turn-level display (Phase 6). At session eviction the completed turn list is serialised into `SessionReport.turns` (an optional field, `None` for pre-Phase-4 records) alongside the existing collector metrics.
+
 ## Configuration
 
 TOML file at `~/.config/codevigil/config.toml` or passed via `--config`. Falls back to built-in defaults if absent.
