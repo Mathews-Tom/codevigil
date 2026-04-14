@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import time
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -175,3 +178,140 @@ def test_parse_health_always_instantiated_even_when_not_in_enabled(
     assert isinstance(parse_health, ParseHealthCollector)
     # Bound to the parser's stats handle, so live counters flow through.
     assert parse_health.stats is ctx.parser.stats
+
+
+# ---------------------------------------------------------------------------
+# Back-dating invariant tests
+# ---------------------------------------------------------------------------
+
+
+def _old_event_line(age_seconds: float) -> str:
+    """Return a valid JSONL user event whose timestamp is age_seconds in the past."""
+    ts = (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat()
+    return json.dumps(
+        {
+            "type": "user",
+            "timestamp": ts,
+            "session_id": "sess-1",
+            "message": {"content": [{"type": "text", "text": "old content"}]},
+        }
+    )
+
+
+def test_ensure_session_backdates_last_monotonic_from_event_timestamp(
+    error_log: Path,
+) -> None:
+    """_ensure_session sets last_monotonic so silence == age_seconds on first tick.
+
+    A NEW_SESSION event whose timestamp is age_seconds old should produce a
+    _SessionContext where clock() - last_monotonic ≈ age_seconds (within 2s
+    tolerance for test execution overhead).
+
+    Use 400s — past the 5-min stale threshold but under the 35-min evict
+    threshold — so the session survives the first lifecycle pass and we can
+    inspect its last_monotonic.
+    """
+    age_seconds = 400.0  # > stale (300s), < evict (2100s)
+    clock = FakeClock(value=time.monotonic())
+    source = FakeSource()
+    aggregator = SessionAggregator(
+        source,
+        config=_config(),
+        project_registry=ProjectRegistry(toml_path=error_log.parent / "absent.toml"),
+        clock=clock,
+        registry=_registry_with_counting(),
+    )
+
+    old_timestamp = datetime.now(UTC) - timedelta(seconds=age_seconds)
+    source.push([make_source_event(SourceEventKind.NEW_SESSION, timestamp=old_timestamp)])
+    list(aggregator.tick())
+
+    # Session should be STALE (400s > stale threshold), not evicted.
+    ctx = aggregator.sessions["sess-1"]
+    assert ctx.state is SessionState.STALE, (
+        f"expected STALE for {age_seconds}s-old session, got {ctx.state}"
+    )
+    silence = clock() - ctx.last_monotonic
+    assert abs(silence - age_seconds) < 2.0, (
+        f"expected silence ≈ {age_seconds}s, got {silence:.1f}s"
+    )
+
+
+def test_ingest_old_event_does_not_refresh_last_monotonic_forward(
+    error_log: Path,
+) -> None:
+    """Replaying old events must not advance last_monotonic toward the current clock.
+
+    After a session is created with a back-dated timestamp (400s old), APPEND
+    events whose JSONL timestamps are equally old must not push last_monotonic
+    to self._clock().  If they did, the lifecycle pass would see silence ≈ 0
+    and keep the session ACTIVE when it should be STALE.
+    """
+    age_seconds = 400.0  # > stale (300s), < evict (2100s)
+    clock = FakeClock(value=time.monotonic())
+    source = FakeSource()
+    aggregator = SessionAggregator(
+        source,
+        config=_config(),
+        project_registry=ProjectRegistry(toml_path=error_log.parent / "absent.toml"),
+        clock=clock,
+        registry=_registry_with_counting(),
+    )
+
+    old_timestamp = datetime.now(UTC) - timedelta(seconds=age_seconds)
+    source.push(
+        [
+            make_source_event(SourceEventKind.NEW_SESSION, timestamp=old_timestamp),
+            make_source_event(
+                SourceEventKind.APPEND,
+                line=_old_event_line(age_seconds),
+                timestamp=old_timestamp,
+            ),
+        ]
+    )
+    list(aggregator.tick())
+
+    # Session must be STALE — the old APPEND must not have reset it to ACTIVE.
+    ctx = aggregator.sessions["sess-1"]
+    assert ctx.state is SessionState.STALE, (
+        f"old APPEND reset lifecycle: expected STALE, got {ctx.state}"
+    )
+    # last_monotonic must remain far in the past; not close to clock().
+    silence = clock() - ctx.last_monotonic
+    assert silence > age_seconds - 5.0, (
+        f"last_monotonic was advanced forward: silence={silence:.1f}s < {age_seconds - 5}s"
+    )
+
+
+def test_ingest_fresh_event_refreshes_last_monotonic_normally(
+    error_log: Path,
+) -> None:
+    """A live APPEND event with a current timestamp advances last_monotonic.
+
+    For a session that started live (timestamp ≈ now), ingesting a fresh
+    JSONL event (timestamp ≈ now) must advance last_monotonic to
+    approximately self._clock() so the silence stays near 0 and the session
+    remains ACTIVE.
+    """
+    clock = FakeClock(value=time.monotonic())
+    source = FakeSource()
+    aggregator = SessionAggregator(
+        source,
+        config=_config(),
+        project_registry=ProjectRegistry(toml_path=error_log.parent / "absent.toml"),
+        clock=clock,
+        registry=_registry_with_counting(),
+    )
+
+    source.push(
+        [
+            make_source_event(SourceEventKind.NEW_SESSION),
+            make_source_event(SourceEventKind.APPEND, line=good_user_line("live")),
+        ]
+    )
+    list(aggregator.tick())
+
+    ctx = aggregator.sessions["sess-1"]
+    silence = clock() - ctx.last_monotonic
+    # Fresh event: silence must be very small (under 5s for test overhead).
+    assert silence < 5.0, f"fresh APPEND did not refresh last_monotonic: silence={silence:.1f}s"
