@@ -14,6 +14,6 @@ from codevigil.privacy import install as _install_privacy_hook
 
 _install_privacy_hook()
 
-__version__: str = "0.2.0"
+__version__: str = "0.2.1"
 
 __all__ = ["PrivacyViolationError", "__version__"]
