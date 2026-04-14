@@ -121,6 +121,7 @@ def _fingerprint_hash(fp: _Fingerprint) -> str:
 # Claude Code session format observed in the wild.
 def _seed_known_fingerprints() -> None:
     samples: list[tuple[dict[str, Any], str]] = [
+        # Modern 2026-03 Claude Code shapes (message-wrapped content)
         (
             {"type": "assistant", "timestamp": "", "session_id": "", "message": {}},
             "2026-03-claude-code",
@@ -132,6 +133,25 @@ def _seed_known_fingerprints() -> None:
         (
             {"type": "system", "timestamp": "", "session_id": "", "subtype": ""},
             "2026-03-claude-code",
+        ),
+        # Pre-v1 shape: role/ts/session keys with inline content list
+        (
+            {"role": "", "ts": "", "session": "", "content": []},
+            "pre-v1-role-ts-session",
+        ),
+        # Pre-v1 flat-content shapes: type/timestamp/session_id with inline
+        # text, tool, or tool_result at the top level (no message wrapper)
+        (
+            {"type": "", "timestamp": "", "session_id": "", "text": ""},
+            "pre-v1-flat-text",
+        ),
+        (
+            {"type": "", "timestamp": "", "session_id": "", "tool": "", "tool_input": {}},
+            "pre-v1-flat-tool",
+        ),
+        (
+            {"type": "", "timestamp": "", "session_id": "", "tool_result": ""},
+            "pre-v1-flat-tool-result",
         ),
     ]
     for sample, epoch in samples:
@@ -309,6 +329,9 @@ class SessionParser:
             self._sample_fingerprint(parsed)
 
             kind_field = parsed.get("type")
+            # Pre-v1 historical shape uses "role" in place of "type".
+            if not isinstance(kind_field, str) and isinstance(parsed.get("role"), str):
+                kind_field = parsed["role"]
             if not isinstance(kind_field, str):
                 self._stats.record_missing("type")
                 self._stats.record_line_outcome(parsed=False)
@@ -440,7 +463,8 @@ class SessionParser:
             self._stats.record_missing("type")
 
     def _extract_timestamp(self, parsed: dict[str, Any]) -> datetime:
-        raw = parsed.get("timestamp")
+        # Check both "timestamp" (modern) and "ts" (pre-v1 historical shape).
+        raw = parsed.get("timestamp") or parsed.get("ts")
         if isinstance(raw, str) and raw:
             try:
                 return datetime.fromisoformat(raw.replace("Z", "+00:00"))
@@ -451,7 +475,8 @@ class SessionParser:
         return datetime.now(tz=UTC)
 
     def _extract_session_id(self, parsed: dict[str, Any]) -> str:
-        raw = parsed.get("session_id")
+        # Check both "session_id" (modern) and "session" (pre-v1 historical shape).
+        raw = parsed.get("session_id") or parsed.get("session")
         if isinstance(raw, str) and raw:
             return raw
         return self._session_id
@@ -501,16 +526,8 @@ class SessionParser:
     ) -> Iterator[Event]:
         message = parsed.get("message")
         if not isinstance(message, dict):
-            self._stats.record_missing("message")
-            record(
-                CodevigilError(
-                    level=ErrorLevel.WARN,
-                    source=ErrorSource.PARSER,
-                    code="parser.missing_message",
-                    message="assistant line missing 'message' object",
-                    context={"session_id": session_id},
-                )
-            )
+            # Pre-v1 flat-content shape: text/tool/tool_input at the top level.
+            yield from self._emit_flat_content_assistant(parsed, timestamp, session_id)
             return
 
         message_id = message.get("id")
@@ -682,16 +699,8 @@ class SessionParser:
     ) -> Iterator[Event]:
         message = parsed.get("message")
         if not isinstance(message, dict):
-            self._stats.record_missing("message")
-            record(
-                CodevigilError(
-                    level=ErrorLevel.WARN,
-                    source=ErrorSource.PARSER,
-                    code="parser.missing_message",
-                    message="user line missing 'message' object",
-                    context={"session_id": session_id},
-                )
-            )
+            # Pre-v1 flat-content shape: text/tool_result at the top level.
+            yield from self._emit_flat_content_user(parsed, timestamp, session_id)
             return
 
         message_id = message.get("id")
@@ -780,6 +789,217 @@ class SessionParser:
             payload=payload,
             message_id=message_id,
         )
+
+    # ------------------------------------------------------------------
+    # Pre-v1 flat-content helpers
+    # ------------------------------------------------------------------
+
+    def _emit_flat_content_assistant(
+        self,
+        parsed: dict[str, Any],
+        timestamp: datetime,
+        session_id: str,
+    ) -> Iterator[Event]:
+        """Handle assistant lines from pre-v1 shapes that carry content without
+        a ``message`` wrapper.
+
+        Two sub-shapes are supported:
+
+        * Inline ``content`` list (pre-v1 role/ts/session shape): the list
+          contains typed blocks identical to modern ``message.content``.
+        * Flat ``text`` / ``tool`` + ``tool_input`` keys at the top level
+          (pre-v1 flat-content shape).
+
+        Both map to the same existing ``Event`` types. No new event types
+        are introduced.
+        """
+        emitted = 0
+
+        # Sub-shape 1: top-level "content" list (pre-v1 role/ts/session).
+        content = parsed.get("content")
+        if isinstance(content, list):
+            blocks = [b for b in content if isinstance(b, dict)]
+            for block in blocks:
+                block_type = block.get("type")
+                if block_type == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        emitted += 1
+                        yield Event(
+                            timestamp=timestamp,
+                            session_id=session_id,
+                            kind=EventKind.ASSISTANT_MESSAGE,
+                            payload={"text": text},
+                        )
+                    else:
+                        self._stats.record_missing("text")
+                elif block_type == "tool_use":
+                    event = self._build_tool_call_event(block, timestamp, session_id)
+                    if event is not None:
+                        emitted += 1
+                        yield event
+                elif block_type == "thinking":
+                    event = self._build_thinking_event(block, timestamp, session_id)
+                    if event is not None:
+                        emitted += 1
+                        yield event
+                else:
+                    self._stats.record_missing("content.type")
+            if emitted == 0:
+                self._stats.parsed_events += 1
+            else:
+                self._stats.parsed_events += emitted
+            return
+
+        # Sub-shape 2: flat text / tool+tool_input keys (pre-v1 flat-content).
+        # Reject lines that carry none of the recognised flat keys — they are
+        # genuinely malformed (e.g. assistant lines with arbitrary unknown
+        # top-level fields), not a known historical shape, and must not be
+        # silently counted as parsed.
+        has_text = isinstance(parsed.get("text"), str)
+        has_tool = isinstance(parsed.get("tool"), str)
+        if not has_text and not has_tool:
+            self._stats.record_missing("message")
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.PARSER,
+                    code="parser.missing_message",
+                    message="assistant line missing 'message' object",
+                    context={"session_id": session_id},
+                )
+            )
+            return
+
+        if has_text:
+            emitted += 1
+            yield Event(
+                timestamp=timestamp,
+                session_id=session_id,
+                kind=EventKind.ASSISTANT_MESSAGE,
+                payload={"text": parsed["text"]},
+            )
+
+        if has_tool:
+            tool_name_raw: str = parsed["tool"]
+            tool_input = parsed.get("tool_input")
+            if not isinstance(tool_input, dict):
+                tool_input = {}
+            canonical = canonicalise_tool_name(tool_name_raw)
+            if canonical == tool_name_raw and tool_name_raw not in TOOL_ALIASES.values():
+                self._note_unknown_tool(tool_name_raw)
+            payload: dict[str, Any] = {
+                "tool_name": canonical,
+                "tool_use_id": "",
+                "input": dict(tool_input),
+            }
+            file_path = tool_input.get("file_path")
+            if isinstance(file_path, str):
+                payload["file_path"] = file_path
+            emitted += 1
+            yield Event(
+                timestamp=timestamp,
+                session_id=session_id,
+                kind=EventKind.TOOL_CALL,
+                payload=payload,
+            )
+
+        self._stats.parsed_events += emitted
+
+    def _emit_flat_content_user(
+        self,
+        parsed: dict[str, Any],
+        timestamp: datetime,
+        session_id: str,
+    ) -> Iterator[Event]:
+        """Handle user lines from pre-v1 shapes that carry content without a
+        ``message`` wrapper.
+
+        Two sub-shapes are supported:
+
+        * Inline ``content`` list (pre-v1 role/ts/session shape): the list
+          contains typed blocks identical to modern ``message.content``.
+        * Flat ``text`` / ``tool_result`` key at the top level (pre-v1
+          flat-content shape).
+
+        Both map to existing ``Event`` types. No new event types are introduced.
+        """
+        emitted = 0
+
+        # Sub-shape 1: top-level "content" list (pre-v1 role/ts/session).
+        content = parsed.get("content")
+        if isinstance(content, list):
+            blocks = [b for b in content if isinstance(b, dict)]
+            for block in blocks:
+                block_type = block.get("type")
+                if block_type == "text":
+                    text = block.get("text")
+                    if isinstance(text, str):
+                        emitted += 1
+                        yield Event(
+                            timestamp=timestamp,
+                            session_id=session_id,
+                            kind=EventKind.USER_MESSAGE,
+                            payload={"text": text},
+                        )
+                    else:
+                        self._stats.record_missing("text")
+                elif block_type == "tool_result":
+                    event = self._build_tool_result_event(block, timestamp, session_id)
+                    if event is not None:
+                        emitted += 1
+                        yield event
+                else:
+                    self._stats.record_missing("content.type")
+            if emitted == 0:
+                self._stats.parsed_events += 1
+            else:
+                self._stats.parsed_events += emitted
+            return
+
+        # Sub-shape 2: flat text / tool_result keys (pre-v1 flat-content).
+        # Reject lines that carry none of the recognised flat keys — they are
+        # genuinely malformed, not a known historical shape.
+        has_text = isinstance(parsed.get("text"), str)
+        has_tool_result = parsed.get("tool_result") is not None
+        if not has_text and not has_tool_result:
+            self._stats.record_missing("message")
+            record(
+                CodevigilError(
+                    level=ErrorLevel.WARN,
+                    source=ErrorSource.PARSER,
+                    code="parser.missing_message",
+                    message="user line missing 'message' object",
+                    context={"session_id": session_id},
+                )
+            )
+            return
+
+        if has_text:
+            emitted += 1
+            yield Event(
+                timestamp=timestamp,
+                session_id=session_id,
+                kind=EventKind.USER_MESSAGE,
+                payload={"text": parsed["text"]},
+            )
+
+        if has_tool_result:
+            tool_result = parsed["tool_result"]
+            output = tool_result if isinstance(tool_result, str) else str(tool_result)
+            emitted += 1
+            yield Event(
+                timestamp=timestamp,
+                session_id=session_id,
+                kind=EventKind.TOOL_RESULT,
+                payload={
+                    "tool_use_id": "",
+                    "is_error": False,
+                    "output": output,
+                },
+            )
+
+        self._stats.parsed_events += emitted
 
     def _emit_system(
         self,

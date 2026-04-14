@@ -118,3 +118,62 @@ def test_redacted_thinking_block_emits_zero_length() -> None:
     assert events[0].kind is EventKind.THINKING
     assert events[0].payload["redacted"] is True
     assert events[0].payload["length"] == 0
+
+
+def test_modern_shape_parse_confidence_unaffected_by_historical_fingerprints() -> None:
+    """Adding historical fingerprints must not alter confidence on modern input.
+
+    Runs the full modern assistant+tool+user+system round-trip and asserts
+    parse_confidence == 1.0 to confirm the expanded KNOWN_FINGERPRINTS do
+    not interfere with the 2026-03 Claude Code parse path.
+    """
+    lines = [
+        _line(
+            {
+                "type": "assistant",
+                "timestamp": "2026-04-13T12:00:00+00:00",
+                "session_id": "modern-regression",
+                "message": {
+                    "content": [
+                        {"type": "text", "text": "checking the file"},
+                        {
+                            "type": "tool_use",
+                            "id": "call-r1",
+                            "name": "Read",
+                            "input": {"file_path": "/tmp/check.py"},
+                        },
+                    ],
+                    "usage": {"output_tokens": 10},
+                },
+            }
+        ),
+        _line(
+            {
+                "type": "user",
+                "timestamp": "2026-04-13T12:00:01+00:00",
+                "session_id": "modern-regression",
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_result",
+                            "tool_use_id": "call-r1",
+                            "is_error": False,
+                            "content": "x = 1",
+                        }
+                    ]
+                },
+            }
+        ),
+        _line(
+            {
+                "type": "system",
+                "timestamp": "2026-04-13T12:00:02+00:00",
+                "session_id": "modern-regression",
+                "subtype": "session_start",
+            }
+        ),
+    ]
+    parser = SessionParser(session_id="modern-regression")
+    events = list(parser.parse(lines))
+    assert parser.stats.parse_confidence == 1.0
+    assert len(events) == 4  # text + tool_call + tool_result + system
