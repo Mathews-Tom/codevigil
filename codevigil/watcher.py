@@ -30,6 +30,26 @@ with ``lines: list[str]``; this implementation emits one ``SourceEvent`` per
 complete line (``line: str | None``). The aggregator phase wires the events
 into the parser one at a time anyway, and the per-line shape removes a layer
 of unpacking at the call site without losing information.
+
+Cold-start timestamp semantics
+------------------------------
+
+When ``PollingSource`` discovers a JSONL file for the first time, the
+``SourceEvent.timestamp`` on the emitted ``NEW_SESSION`` event is set to the
+file's ``stat.st_mtime`` (converted to a UTC ``datetime``), not the current
+wall-clock time.
+
+For a file that genuinely just appeared (live new session), ``st_mtime`` and
+``_now()`` are equivalent within milliseconds, so the aggregator's lifecycle
+math is unaffected.  For a pre-existing file replayed at startup, ``st_mtime``
+reflects the last real write — often minutes, hours, or days in the past.  The
+aggregator consumes this truthful timestamp to back-date the monotonic cursor
+(``_SessionContext.last_monotonic``) so the 5-min / 35-min stale/evict
+thresholds classify cold-replayed sessions correctly on the very first tick,
+without waiting for real wall-clock time to pass.
+
+See ``docs/design.md`` §Watcher Design → Cold-Start Replay for the full
+back-dating derivation.
 """
 
 from __future__ import annotations
@@ -280,7 +300,7 @@ class PollingSource:
                 continue
             if not stat.S_ISREG(st.st_mode):
                 continue
-            self._handle_path(path, st.st_ino, st.st_size, events)
+            self._handle_path(path, st.st_ino, st.st_size, st.st_mtime, events)
 
         # Detect deletions: any cursored path that no longer appears in the
         # walk has been removed from the watched tree.
@@ -312,11 +332,12 @@ class PollingSource:
         path: Path,
         inode: int,
         size: int,
+        mtime: float,
         events: list[SourceEvent],
     ) -> None:
         cursor = self._cursors.get(path)
         if cursor is None:
-            self._handle_new(path, inode, size, events)
+            self._handle_new(path, inode, size, mtime, events)
             return
         if inode != cursor.inode:
             events.append(
@@ -330,7 +351,7 @@ class PollingSource:
                 )
             )
             self._cursors.pop(path, None)
-            self._handle_new(path, inode, size, events, emit_new_session=False)
+            self._handle_new(path, inode, size, mtime, events, emit_new_session=False)
             return
         if size < cursor.size:
             events.append(
@@ -344,7 +365,7 @@ class PollingSource:
                 )
             )
             self._cursors.pop(path, None)
-            self._handle_new(path, inode, size, events, emit_new_session=False)
+            self._handle_new(path, inode, size, mtime, events, emit_new_session=False)
             return
         if size > cursor.size:
             growth = size - cursor.offset
@@ -356,6 +377,7 @@ class PollingSource:
         path: Path,
         inode: int,
         size: int,
+        mtime: float,
         events: list[SourceEvent],
         *,
         emit_new_session: bool = True,
@@ -363,6 +385,11 @@ class PollingSource:
         cursor = FileCursor(path=path, inode=inode, size=0, offset=0, pending=b"")
         self._cursors[path] = cursor
         if emit_new_session:
+            # Use the file's mtime as the NEW_SESSION timestamp so the
+            # aggregator can back-date the monotonic cursor for pre-existing
+            # files replayed at startup.  For files that just appeared, mtime
+            # and _now() are equivalent within milliseconds.
+            mtime_dt = datetime.fromtimestamp(mtime, tz=UTC)
             events.append(
                 SourceEvent(
                     kind=SourceEventKind.NEW_SESSION,
@@ -370,7 +397,7 @@ class PollingSource:
                     path=path,
                     inode=inode,
                     line=None,
-                    timestamp=_now(),
+                    timestamp=mtime_dt,
                 )
             )
         if size > 0:

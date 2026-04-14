@@ -27,6 +27,40 @@ The "always on, never disableable" rule for ``parse_health`` is enforced
 here in addition to ``codevigil.config``: even if a future code path managed
 to drop ``parse_health`` from ``collectors.enabled``, the aggregator still
 instantiates it for every session.
+
+Monotonic-cursor back-dating invariant
+---------------------------------------
+
+``_SessionContext.last_monotonic`` is the aggregator's internal clock value
+corresponding to the last observed activity for a session.  The lifecycle pass
+computes ``silence = now_clock - last_monotonic`` and transitions ACTIVE →
+STALE after 5 minutes of silence and STALE → EVICTED after 35 minutes.
+
+For live sessions, ``last_monotonic`` is set to ``self._clock()`` at session
+creation and refreshed to ``self._clock()`` on every ingested event — silence
+accurately tracks real wall-clock inactivity.
+
+For cold-start replay (files pre-existing when ``codevigil watch`` launches),
+``SourceEvent.timestamp`` carries the file's actual ``st_mtime`` rather than
+``_now()``.  The aggregator uses the age of that timestamp to back-date
+``last_monotonic`` at session creation::
+
+    age_seconds = max(0.0, (datetime.now(UTC) - source_event.timestamp).total_seconds())
+    last_monotonic = now_clock - age_seconds
+
+This means the first lifecycle pass sees ``silence ≈ age_seconds`` for every
+cold-replayed session, so the existing 5-min / 35-min thresholds classify them
+correctly on the first tick without waiting for real wall-clock time.
+
+The same back-dating is applied in ``_ingest_line`` when replayed APPEND
+events carry old timestamps: ``last_monotonic`` is set to
+``self._clock() - age_seconds`` rather than ``self._clock()``, so replayed
+batches of old events do not artificially reset the lifecycle cursor forward.
+
+Callers that read ``ctx.last_monotonic`` must not assume it is close to
+``self._clock()``.  It may be arbitrarily far in the past for cold-replayed
+sessions.  The only correct use is to compute ``self._clock() -
+ctx.last_monotonic`` as a silence duration.
 """
 
 from __future__ import annotations
@@ -290,6 +324,14 @@ class SessionAggregator:
         now_clock = self._clock()
         now_wall = source_event.timestamp
         project_hash = self._extract_project_hash(source_event.path, session_id=sid)
+        # Back-date last_monotonic so the lifecycle pass sees an accurate
+        # silence duration on the first tick.  For a live new session mtime
+        # equals _now() so age_seconds ≈ 0 and last_monotonic ≈ now_clock.
+        # For a cold-replayed file, mtime may be hours or days old, so
+        # last_monotonic is shifted back by that age — silence on the first
+        # lifecycle pass equals the file's true age.
+        age_seconds = max(0.0, (datetime.now(UTC) - now_wall).total_seconds())
+        last_monotonic = now_clock - age_seconds
         ctx = _SessionContext(
             session_id=sid,
             file_path=source_event.path,
@@ -298,7 +340,7 @@ class SessionAggregator:
             collectors=collectors,
             first_event_time=now_wall,
             last_event_time=now_wall,
-            last_monotonic=now_clock,
+            last_monotonic=last_monotonic,
         )
         self._sessions[sid] = ctx
         return ctx
@@ -396,7 +438,16 @@ class SessionAggregator:
                 ctx.first_event_time_set = True
             ctx.event_count += 1
             ctx.last_event_time = event.timestamp
-            ctx.last_monotonic = self._clock()
+            # Back-date the monotonic cursor using the event's own timestamp
+            # so replayed batches of old events do not reset the lifecycle
+            # cursor forward.  For a live event, event.timestamp ≈ now so
+            # age ≈ 0 and last_monotonic ≈ self._clock() as before.
+            # Only advance last_monotonic — never move it backwards relative
+            # to what _ensure_session already set.
+            event_age = max(0.0, (datetime.now(UTC) - event.timestamp).total_seconds())
+            candidate = self._clock() - event_age
+            if candidate > ctx.last_monotonic:
+                ctx.last_monotonic = candidate
             if ctx.state is SessionState.STALE:
                 # STALE → ACTIVE on a new APPEND (the "coffee break" rule).
                 # Collector state is intentionally preserved.

@@ -506,6 +506,25 @@ A session is `ACTIVE` while new lines arrive. After 5 minutes with no APPEND eve
 
 A STALE session that receives a new APPEND returns to ACTIVE with collector state intact — a coffee break should not reset your metrics. Only EVICTED triggers state loss, and only after 35 minutes of silence.
 
+### Cold-Start Replay
+
+When `codevigil watch` launches against an existing session store, `PollingSource` discovers every pre-existing JSONL file on its first `poll()` call. To ensure the 5-min / 35-min thresholds classify these files correctly on the very first lifecycle tick — without waiting for real wall-clock time to pass — the watcher and aggregator cooperate to back-date the monotonic lifecycle cursor:
+
+1. `PollingSource._handle_new` converts `stat.st_mtime` to a UTC datetime and stamps it on the `NEW_SESSION` `SourceEvent.timestamp`. For a file that just appeared, `st_mtime ≈ now` so behaviour is unchanged. For a pre-existing file from hours or days ago, `st_mtime` carries the true last-write time.
+
+2. `SessionAggregator._ensure_session` derives the event's age (`now - source_event.timestamp`) and subtracts it from the current monotonic clock to produce a back-dated `last_monotonic`:
+
+   ```
+   age_seconds = max(0.0, (datetime.now(UTC) - source_event.timestamp).total_seconds())
+   last_monotonic = now_clock - age_seconds
+   ```
+
+   This means the first `_run_lifecycle_pass()` computes `silence = now_clock - last_monotonic = age_seconds`, which is the file's true age. A file last written 2 hours ago immediately satisfies the 35-minute eviction threshold and is dropped on the first tick. A file last written 3 minutes ago stays ACTIVE.
+
+3. `SessionAggregator._ingest_line` applies the same back-dating to each ingested JSONL event's timestamp, but only advances `last_monotonic` forward — it never moves it backward relative to its current value. Old replayed events converge toward the most recent JSONL event's timestamp; genuinely fresh live APPEND events advance `last_monotonic` to approximately the current clock, keeping live sessions ACTIVE.
+
+The `_stale_after_seconds` (300 s) and `_evict_after_seconds` (2100 s) defaults are not changed by this mechanism — the existing thresholds are correct, and the back-dating makes them apply to cold-replayed sessions that previously appeared ACTIVE regardless of their true age.
+
 ### v0.2+: inotify / fsevents
 
 Drop in an `InotifySource` or `FSEventsSource` implementing the same `Source` protocol. The aggregator doesn't know or care which source is upstream. Cross-platform selection lives behind a factory function in `watcher.py`. The `PollingSource` remains as a universal fallback.
