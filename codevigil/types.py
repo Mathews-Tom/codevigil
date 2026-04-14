@@ -34,12 +34,19 @@ class Event:
     per-``EventKind`` schemas live in ``docs/design.md`` §Payload Schemas by
     EventKind and are enforced by ``safe_get`` at read time, not by a
     dataclass tree. This keeps the kind space open for additive growth.
+
+    ``message_id`` is the raw API message ID extracted from the JSONL line's
+    ``message.id`` field. It is ``None`` for system events, synthesised lines,
+    and older session files that predate the ID field. The parser uses it for
+    deduplication; collectors and renderers may read it but must never filter
+    on it unconditionally (``None`` events are always valid).
     """
 
     timestamp: datetime
     session_id: str
     kind: EventKind
     payload: dict[str, Any]
+    message_id: str | None = None
 
 
 class Severity(Enum):

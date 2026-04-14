@@ -185,10 +185,16 @@ class ParseStats:
     window as soon as the drift rate inside it crosses the threshold.
     A session-wide ratio is still exposed as :attr:`session_confidence`
     for callers that want the historical semantic.
+
+    ``duplicate_count`` counts how many events were suppressed because
+    their message ID had already been seen in this session. It is
+    surfaced in :class:`ParseHealthCollector`'s detail dict so
+    ``history detail`` can display it.
     """
 
     total_lines: int = 0
     parsed_events: int = 0
+    duplicate_count: int = 0
     missing_fields: dict[str, int] = field(default_factory=dict)
     _line_outcomes: deque[bool] = field(
         default_factory=lambda: deque(maxlen=_ROLLING_CONFIDENCE_WINDOW)
@@ -260,6 +266,11 @@ class SessionParser:
         self._fingerprint_warned: bool = False
         self._fingerprints_warned: set[str] = set()
         self._lines_fingerprinted: int = 0
+        # Message-ID deduplication: one set per parser instance (one session).
+        # Events whose message.id has already been seen are dropped silently
+        # and duplicate_count is incremented. Events with id=None pass through
+        # unconditionally — we never deduplicate ID-less events.
+        self._seen_message_ids: set[str] = set()
 
     @property
     def stats(self) -> ParseStats:
@@ -453,6 +464,35 @@ class SessionParser:
             return [{"type": "text", "text": content}]
         return []
 
+    def _check_duplicate(self, message_id: str | None) -> bool:
+        """Return True when the message_id has already been seen (drop it).
+
+        When message_id is None the event is never considered a duplicate —
+        ID-less events always pass through. First occurrence of any string
+        ID registers it and returns False (pass through). Subsequent
+        occurrences of the same ID return True (drop) and increment the
+        duplicate_count counter.
+        """
+        if message_id is None:
+            return False
+        if message_id in self._seen_message_ids:
+            self._stats.duplicate_count += 1
+            record(
+                CodevigilError(
+                    level=ErrorLevel.INFO,
+                    source=ErrorSource.PARSER,
+                    code="parser.duplicate_message",
+                    message=f"duplicate message id {message_id!r} suppressed",
+                    context={
+                        "session_id": self._session_id,
+                        "message_id": message_id,
+                    },
+                )
+            )
+            return True
+        self._seen_message_ids.add(message_id)
+        return False
+
     def _emit_assistant(
         self,
         parsed: dict[str, Any],
@@ -473,21 +513,31 @@ class SessionParser:
             )
             return
 
+        message_id = message.get("id")
+        msg_id: str | None = message_id if isinstance(message_id, str) else None
+
+        if self._check_duplicate(msg_id):
+            # Count the line as parsed (it was valid) so confidence is not hit.
+            self._stats.parsed_events += 1
+            return
+
         emitted = 0
         for block in self._content_blocks(message):
             block_type = block.get("type")
             if block_type == "text":
-                event = self._build_assistant_text_event(block, message, timestamp, session_id)
+                event = self._build_assistant_text_event(
+                    block, message, timestamp, session_id, msg_id
+                )
                 if event is not None:
                     emitted += 1
                     yield event
             elif block_type == "tool_use":
-                event = self._build_tool_call_event(block, timestamp, session_id)
+                event = self._build_tool_call_event(block, timestamp, session_id, msg_id)
                 if event is not None:
                     emitted += 1
                     yield event
             elif block_type == "thinking":
-                event = self._build_thinking_event(block, timestamp, session_id)
+                event = self._build_thinking_event(block, timestamp, session_id, msg_id)
                 if event is not None:
                     emitted += 1
                     yield event
@@ -507,6 +557,7 @@ class SessionParser:
         message: dict[str, Any],
         timestamp: datetime,
         session_id: str,
+        message_id: str | None = None,
     ) -> Event | None:
         text = block.get("text")
         if not isinstance(text, str):
@@ -521,6 +572,7 @@ class SessionParser:
             session_id=session_id,
             kind=EventKind.ASSISTANT_MESSAGE,
             payload=payload,
+            message_id=message_id,
         )
 
     def _extract_token_count(self, message: dict[str, Any]) -> int | None:
@@ -537,6 +589,7 @@ class SessionParser:
         block: dict[str, Any],
         timestamp: datetime,
         session_id: str,
+        message_id: str | None = None,
     ) -> Event | None:
         raw_name = block.get("name")
         tool_use_id = block.get("id")
@@ -566,6 +619,7 @@ class SessionParser:
             session_id=session_id,
             kind=EventKind.TOOL_CALL,
             payload=payload,
+            message_id=message_id,
         )
 
     def _note_unknown_tool(self, raw_name: str) -> None:
@@ -590,6 +644,7 @@ class SessionParser:
         block: dict[str, Any],
         timestamp: datetime,
         session_id: str,
+        message_id: str | None = None,
     ) -> Event | None:
         raw_text = block.get("thinking")
         signature = block.get("signature")
@@ -616,6 +671,7 @@ class SessionParser:
             session_id=session_id,
             kind=EventKind.THINKING,
             payload=payload,
+            message_id=message_id,
         )
 
     def _emit_user(
@@ -638,6 +694,14 @@ class SessionParser:
             )
             return
 
+        message_id = message.get("id")
+        msg_id: str | None = message_id if isinstance(message_id, str) else None
+
+        if self._check_duplicate(msg_id):
+            # Count the line as parsed (it was valid) so confidence is not hit.
+            self._stats.parsed_events += 1
+            return
+
         blocks = self._content_blocks(message)
         emitted = 0
         if not blocks:
@@ -648,6 +712,7 @@ class SessionParser:
                     session_id=session_id,
                     kind=EventKind.USER_MESSAGE,
                     payload={"text": text},
+                    message_id=msg_id,
                 )
                 emitted += 1
             else:
@@ -665,10 +730,11 @@ class SessionParser:
                     session_id=session_id,
                     kind=EventKind.USER_MESSAGE,
                     payload={"text": text},
+                    message_id=msg_id,
                 )
                 emitted += 1
             elif block_type == "tool_result":
-                event = self._build_tool_result_event(block, timestamp, session_id)
+                event = self._build_tool_result_event(block, timestamp, session_id, msg_id)
                 if event is not None:
                     yield event
                     emitted += 1
@@ -685,6 +751,7 @@ class SessionParser:
         block: dict[str, Any],
         timestamp: datetime,
         session_id: str,
+        message_id: str | None = None,
     ) -> Event | None:
         tool_use_id = block.get("tool_use_id")
         if not isinstance(tool_use_id, str):
@@ -711,6 +778,7 @@ class SessionParser:
             session_id=session_id,
             kind=EventKind.TOOL_RESULT,
             payload=payload,
+            message_id=message_id,
         )
 
     def _emit_system(
