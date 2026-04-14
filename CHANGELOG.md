@@ -9,6 +9,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 no changes yet.
 
+## [0.2.0] - 2026-04-14
+
+### Added
+
+- **Turn abstraction and TurnGrouper sidecar** (`aggregator.py`). The aggregator now groups raw events into completed `Turn` dataclass instances inside each `_SessionContext`. A turn spans one user message and the assistant's complete response. Completed turns are accumulated in `_SessionContext.completed_turns` and serialised into `SessionReport.turns` at eviction.
+- **Turn-level task classifier** (`classifier.py`). A two-stage cascade classifier assigns one of five category labels — `exploration`, `mutation_heavy`, `debug_loop`, `planning`, `mixed` — to each completed turn. Stage 1 applies tool-presence heuristics (mutation count, bash count, read/glob dominance). Stage 2 applies keyword regex against the user message text when Stage 1 is ambiguous. Session-level label is the majority-vote aggregate across all classified turns.
+- **Classifier calibration gate** (`tests/test_classifier_calibration.py`). Asserts ≥ 85% agreement between the classifier and a hand-labeled fixture corpus. Fails the build if not met. Calibration script at `scripts/calibrate_classifier.py` writes a confusion matrix to `.docs/classifier-calibration.md`.
+- **`session_task_type` and `turn_task_types` fields on `SessionReport`**. Additive optional fields; pre-0.2.0 records read back as `None` without error. No migration required.
+- **`history list --task-type NAME` filter**. Filters stored sessions by classifier-derived task type label. Sessions with no task type are excluded. Requires `classifier.enabled = true`.
+- **`task_type [experimental]` column in `history list`**. Hidden entirely when no session in the result set carries a task type, preserving backward compatibility with stores created before the classifier was enabled.
+- **`history heatmap --axis task_type`** [experimental]. Cross-tabulates metric means across all stored sessions grouped by classifier task type. Sessions with no task type appear under `(unclassified)`. Exits 1 with a descriptive error if the classifier is disabled.
+- **Task type in `history <SESSION_ID>` detail view**. A "Turn Task Types" panel shows per-turn labels. Session-level label appears in the header as `task_type: <label> [experimental]`. Both surfaces are absent when the classifier was disabled at capture time.
+- **Task type tag in `codevigil watch` session header**. `[task: <label>] [experimental]` appears right-aligned when a task type has been derived from the session's completed turns.
+- **Proportional gradient bars in `history heatmap` cells**. Each cell now renders a 9-glyph smooth gradient bar scaled to the cell value relative to the column maximum, replacing the raw scalar with a visual magnitude signal.
+- **Message-ID deduplication in `SessionParser`**. The parser now tracks seen message IDs and skips duplicate entries. This is an additive correctness fix — see the "Correctness fix callout" below.
+- **`[classifier]` configuration section**. Two new config keys: `classifier.enabled` (bool, default `true`) and `classifier.experimental` (bool, default `true`). See [docs/configuration.md](docs/configuration.md#classifier) and [docs/classifier.md](docs/classifier.md) for full documentation.
+
+### Changed
+
+- **`codevigil report` default behavior changed**. When invoked with no `--from` or `--to` flags, `report` now runs in **multi-period mode**: it computes three windows relative to now — `today`, `7d`, and `30d` — and renders three stacked summaries. JSON output is `{"today": [...], "7d": [...], "30d": [...]}`. The output file is `report_multi_period.json` (or `report_multi_period.txt` for markdown).
+
+  > **Migration note for scripts and CI pipelines.** Any script that relied on the previous default behavior (a flat per-session report with no date filter) must add `--from 1970-01-01` to explicitly request single-period mode. The single-period output format and file names (`report.json` / `report.md`) are unchanged when `--from` or `--to` is supplied.
+
+- **`--from`/`--to` filtering is now event-level, not session-level**. Events are filtered individually by timestamp. Sessions that straddle a date boundary contribute only their in-window events; `started_at`/`ended_at` are clamped to the first/last in-window event. Sessions with zero in-window events are omitted entirely.
+
+  > **Correctness fix callout.** Previous versions dropped or kept entire sessions based on the session's first event timestamp. The new per-event filtering means that reports generated with narrow date windows over sessions that straddle those windows will show different (lower) event counts and metric values. This is the correct behaviour.
+
+### Fixed
+
+- **Message-ID deduplication** (`parser.py`). The parser previously emitted duplicate `Event` objects when Claude Code compaction rewrote the session JSONL with overlapping entries. Seen message IDs are now tracked per-file; duplicates are silently discarded.
+
+  > **Correctness fix callout.** Sessions that underwent compaction will show lower event counts and potentially different metric values (particularly `parse_health.duplicate_count`) after upgrading to 0.2.0. This is the correct behaviour — the prior metric values were inflated by duplicates.
+
+- **Entry-level date filtering** (`report.py`). The previous implementation filtered sessions by the session's first event timestamp rather than filtering individual events. The fix aligns filtering with documented semantics.
+
+  > **Correctness fix callout.** Reports generated over sessions that straddle a `--from`/`--to` window will show lower event counts after upgrading. This is the correct behaviour. Scripts that used narrow date windows and compared output against a pre-0.2.0 baseline should re-generate their baselines.
+
 ## [0.1.1] - 2026-04-13
 
 License-metadata correction. The `0.1.0` wheel published to PyPI declared
@@ -76,6 +113,7 @@ Initial alpha release. Stdlib-only runtime, Python 3.11+, zero network egress.
 - No `inotify` / `fsevents` integration; the watcher is polling-only.
 - Single-process tick loop. No concurrent rendering or multi-host fan-in.
 
-[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.1.1...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/Mathews-Tom/codevigil/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.0
