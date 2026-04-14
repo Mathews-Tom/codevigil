@@ -7,6 +7,13 @@ The heatmap renders a ``rich.table.Table`` where:
   ``—`` when the metric falls in a different severity bucket.
 
 Color: ok=green, warn=yellow, crit=red cells.
+
+``--axis task_type`` (experimental):
+  Cross-tabulates metrics across all sessions grouped by their
+  ``session_task_type`` label. Requires ``classifier.enabled = True`` in the
+  config; exits 1 with a descriptive error when the classifier is disabled.
+  The cross-tab is marked ``[experimental]`` because it depends on classifier
+  output. The default single-session axis is unchanged.
 """
 
 from __future__ import annotations
@@ -16,34 +23,67 @@ from pathlib import Path
 from typing import Any
 
 import rich.console
+import rich.markup
 import rich.table
 
 from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.history.filters import classify_metric_severity
+
+# Valid axis choices for --axis.
+_VALID_AXES: frozenset[str] = frozenset({"severity", "task_type"})
+
+# Badge string for experimental surfaces (escaped for Rich markup).
+_EXPERIMENTAL_BADGE: str = rich.markup.escape("[experimental]")
 
 
 def run_heatmap(
     session_id: str,
     *,
     store_dir: Path | None = None,
+    axis: str = "severity",
+    classifier_enabled: bool = True,
+    classifier_experimental: bool = True,
     out: Any = None,
     err: Any = None,
 ) -> int:
-    """Render a tool x severity heatmap for a single session.
+    """Render a heatmap for one session (default) or a task-type cross-tab.
 
     Parameters:
-        session_id: Session id to render.
+        session_id: Session id to render (used when ``axis="severity"``).
         store_dir: Override the default ``SessionStore`` directory.
+        axis: Heatmap axis. ``"severity"`` (default) renders the single-session
+            metric x severity matrix. ``"task_type"`` renders a cross-tab of
+            metric means by task type across all stored sessions.
+        classifier_enabled: When ``False`` and ``axis="task_type"``, exits 1
+            with a descriptive error instead of rendering. Set from
+            ``classifier.enabled`` config key.
+        classifier_experimental: When ``True``, adds ``[experimental]`` badge
+            to task-type axis output. Set from ``classifier.experimental``.
         out: Output stream. Defaults to ``sys.stdout``.
         err: Error stream. Defaults to ``sys.stderr``.
 
     Returns:
-        ``0`` on success, ``1`` when session not found.
+        ``0`` on success, ``1`` when session not found or when
+        ``axis="task_type"`` is requested but the classifier is disabled.
     """
     if out is None:
         out = sys.stdout
     if err is None:
         err = sys.stderr
+
+    if axis == "task_type":
+        if not classifier_enabled:
+            out.write(
+                "error: --axis task_type requires classifier.enabled = true in config; "
+                "the classifier is currently disabled. Enable it or use --axis severity.\n"
+            )
+            return 1
+        store = SessionStore(base_dir=store_dir)
+        reports = store.list_reports()
+        _render_task_type_crosstab(
+            reports, classifier_experimental=classifier_experimental, out=out
+        )
+        return 0
 
     store = SessionStore(base_dir=store_dir)
     report = store.get_report(session_id)
@@ -73,6 +113,64 @@ def _render_heatmap(report: SessionReport, *, out: Any) -> None:
         warn_val = f"{value:.4f}" if sev == "warn" else "—"
         crit_val = f"{value:.4f}" if sev == "crit" else "—"
         tbl.add_row(name, ok_val, warn_val, crit_val)
+
+    console.print(tbl)
+
+
+def _render_task_type_crosstab(
+    reports: list[SessionReport],
+    *,
+    classifier_experimental: bool,
+    out: Any,
+) -> None:
+    """Render a metric x task_type cross-tab across all sessions.
+
+    Groups sessions by ``session_task_type``. For each (task_type, metric)
+    cell, shows the mean metric value across all sessions with that task type.
+    Sessions whose ``session_task_type`` is ``None`` are grouped under the
+    label ``(unclassified)``. Cells with no observations show ``—``.
+    """
+    console = rich.console.Console(file=out, highlight=False)
+
+    # Collect unique task types and metric names.
+    task_types: list[str] = []
+    seen_types: set[str] = set()
+    metric_names: set[str] = set()
+
+    for report in reports:
+        label = report.session_task_type or "(unclassified)"
+        if label not in seen_types:
+            seen_types.add(label)
+            task_types.append(label)
+        metric_names.update(report.metrics.keys())
+
+    sorted_metrics = sorted(metric_names)
+    # Build accumulator: task_type → metric → list[float]
+    accum: dict[str, dict[str, list[float]]] = {tt: {} for tt in task_types}
+    for report in reports:
+        label = report.session_task_type or "(unclassified)"
+        for mname, mval in report.metrics.items():
+            accum[label].setdefault(mname, []).append(mval)
+
+    badge = f" {_EXPERIMENTAL_BADGE}" if classifier_experimental else ""
+    tbl = rich.table.Table(
+        title=f"Heatmap by task_type{badge}",
+        show_header=True,
+    )
+    tbl.add_column("metric", style="bold")
+    for tt in task_types:
+        tbl.add_column(tt, justify="right")
+
+    for mname in sorted_metrics:
+        row_vals: list[str] = [mname]
+        for tt in task_types:
+            vals = accum[tt].get(mname, [])
+            if vals:
+                mean_val = sum(vals) / len(vals)
+                row_vals.append(f"{mean_val:.4f}")
+            else:
+                row_vals.append("—")
+        tbl.add_row(*row_vals)
 
     console.print(tbl)
 
