@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 no changes yet.
 
+## [0.2.1] - 2026-04-15
+
+### Added
+
+- **`watch.display_limit` config key** (default `20`, range `[1, 500]`). Caps the `codevigil watch` dashboard to the top-N session blocks per frame, ranked by severity then recency. When the active set exceeds the cap, a footer line reports how many sessions were omitted and reminds you how to raise the limit. Env binding: `CODEVIGIL_WATCH_DISPLAY_LIMIT`.
+
+### Changed
+
+- **Fleet header `updated=` now reflects render wall-clock tick time.** Previously the timestamp was frozen at the newest `last_event_time` across all session files — a historical-event peak that never advanced. It now shows the time the most recent frame was rendered, giving a true liveness indicator.
+
+### Fixed
+
+- **Cold-start lifecycle classification.** `codevigil watch` no longer flags historical replayed sessions as ACTIVE. On the first lifecycle tick after startup, sessions are classified using their actual last-event age against the existing 5-min / 35-min stale / evict thresholds. Sessions from hours or days ago immediately appear as STALE or EVICTED rather than filling the active-set count with ghost sessions.
+
+- **`parse_confidence` on older Claude Code JSONL files.** The parser now recognises additional historical JSONL shapes that were missing from the original fingerprint table: `ts`/`session` timestamp aliases, top-level `role` kind promotion, and flat-content records carrying `text`, `tool`, `tool_input`, or `tool_result` keys without the `message` wrapper. Session stores that previously reported `parse_confidence ≈ 0.31` on older files should now report `≥ 0.9`.
+
+- **Non-determinism in `test_20_session_fixture_renders_deterministically`.** The wall-clock `updated=` header change caused this test to fail intermittently because two `TerminalRenderer` instances produced frames at different wall-clock instants. The test now injects a pinned fixed clock on both renderer instances so the comparison is stable.
+
 ## [0.2.0] - 2026-04-14
 
 ### Added
@@ -113,7 +131,8 @@ Initial alpha release. Stdlib-only runtime, Python 3.11+, zero network egress.
 - No `inotify` / `fsevents` integration; the watcher is polling-only.
 - Single-process tick loop. No concurrent rendering or multi-host fan-in.
 
-[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Mathews-Tom/codevigil/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.1
 [0.1.0]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.0
