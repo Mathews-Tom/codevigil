@@ -26,12 +26,12 @@ Start here. The repository [README](../README.md) is the front-door pitch and qu
 
 The docs follow the [Diátaxis framework](https://diataxis.fr/) — four distinct kinds of documentation, each serving a different reader need.
 
-| Kind        | Doc                                                                                    | What it does for you                                                        |
-| ----------- | -------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| Tutorial    | [getting-started.md](getting-started.md)                                               | Walks you through your first run end to end. Read once.                     |
-| How-to      | [README quickstart](../README.md#first-run), [installation.md](installation.md)        | Recipes for specific outcomes. Read when you need them.                     |
+| Kind        | Doc                                                                                                                    | What it does for you                                                        |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| Tutorial    | [getting-started.md](getting-started.md)                                                                               | Walks you through your first run end to end. Read once.                     |
+| How-to      | [README quickstart](../README.md#first-run), [installation.md](installation.md)                                        | Recipes for specific outcomes. Read when you need them.                     |
 | Reference   | [cli.md](cli.md), [configuration.md](configuration.md), [collectors.md](collectors.md), [classifier.md](classifier.md) | Lookup material. Skim, then return when you need a specific fact.           |
-| Explanation | [privacy.md](privacy.md), [design.md](design.md)                                       | Why codevigil is the way it is. Read when you want to understand decisions. |
+| Explanation | [privacy.md](privacy.md), [design.md](design.md)                                                                       | Why codevigil is the way it is. Read when you want to understand decisions. |
 
 ## Conventions across the docs
 
