@@ -80,14 +80,18 @@ def make_source_event(
     )
 
 
-def good_user_line(text: str = "hello") -> str:
+def good_user_line(text: str = "hello", *, session_id: str = "sess-1") -> str:
     import json
 
+    # Use a timestamp within the last 30 seconds so lifecycle tests that
+    # back-date last_monotonic from event.timestamp still treat this as a
+    # "live" event (age ≈ 0 → no back-dating applied).
+    ts = datetime.now(tz=UTC).isoformat()
     return json.dumps(
         {
             "type": "user",
-            "timestamp": "2026-04-13T12:00:00+00:00",
-            "session_id": "sess-1",
+            "timestamp": ts,
+            "session_id": session_id,
             "message": {"content": [{"type": "text", "text": text}]},
         }
     )
