@@ -38,6 +38,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "stale_after_seconds": 300,
         "evict_after_seconds": 2100,
         "tick_interval": 1.0,
+        "display_limit": 20,
     },
     "collectors": {
         "enabled": ["read_edit_ratio", "stop_phrase", "reasoning_loop"],
@@ -139,6 +140,7 @@ _ENV_BINDINGS: dict[str, tuple[str, ...]] = {
     "CODEVIGIL_WATCH_ROOT": ("watch", "root"),
     "CODEVIGIL_WATCH_POLL_INTERVAL": ("watch", "poll_interval"),
     "CODEVIGIL_WATCH_TICK_INTERVAL": ("watch", "tick_interval"),
+    "CODEVIGIL_WATCH_DISPLAY_LIMIT": ("watch", "display_limit"),
     "CODEVIGIL_REPORT_OUTPUT_DIR": ("report", "output_dir"),
     "CODEVIGIL_REPORT_OUTPUT_FORMAT": ("report", "output_format"),
     "CODEVIGIL_BOOTSTRAP_SESSIONS": ("bootstrap", "sessions"),
@@ -697,6 +699,13 @@ def _validate_resolved(values: dict[str, Any]) -> None:
         kind="int",
     )
 
+    _validate_range(
+        values,
+        "watch.display_limit",
+        minimum=1,
+        maximum=500,
+        kind="int",
+    )
     _validate_stale_vs_evict(values)
     _validate_enabled_names(
         values,
