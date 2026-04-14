@@ -88,6 +88,26 @@ The script reads `tests/fixtures/task_classification/labels.json`, runs each lab
 
 Rerun `scripts/calibrate_classifier.py` and commit the updated `.docs/classifier-calibration.md` alongside any change to `TOOL_SIGNATURES` or `KEYWORD_PATTERNS` in `codevigil/classifier.py`.
 
+## User-visible surfaces
+
+The classifier output appears in four places. Every surface that shows a task label is tagged `[experimental]` while `classifier.experimental = true` (the default). All four surfaces degrade cleanly when the classifier is disabled.
+
+### `history list`
+
+When at least one session in the result set has a `session_task_type`, a `task_type [experimental]` column appears in the table. Sessions with no task type show `—` in that cell. The column is hidden entirely — not just empty — when no session carries a task type. Use `--task-type <name>` to filter to sessions with a specific label.
+
+### `history heatmap --axis task_type`
+
+Cross-tabulates metric means across all stored sessions grouped by task type. Sessions with no task type appear under `(unclassified)`. The table title carries `[experimental]`. Exits 1 with a descriptive error if `classifier.enabled = false`.
+
+### `history <SESSION_ID>` (detail view)
+
+When the session carries per-turn task type data, a "Turn Task Types" panel is rendered below the metrics table. Each line shows `Turn N: [<label>] [experimental]`. The session-level label also appears in the header block as `task_type: <label> [experimental]`. Both surfaces are absent when the classifier was disabled at capture time.
+
+### `codevigil watch` session header
+
+A `[task: <label>] [experimental]` tag appears right-aligned on the session header line when a task type has been derived from the session's completed turns. The tag is suppressed when `session_task_type` is `None` (no turns classified yet, or classifier disabled).
+
 ## Disabling the classifier
 
 ```toml
@@ -95,4 +115,4 @@ Rerun `scripts/calibrate_classifier.py` and commit the updated `.docs/classifier
 enabled = false
 ```
 
-When disabled, `classify_turn` is never called. Every turn's `task_type` remains `None`. `session_task_type` and `turn_task_types` are `null` in session reports. No CPU is spent on classification.
+When disabled, `classify_turn` is never called. Every turn's `task_type` remains `None`. `session_task_type` and `turn_task_types` are `null` in session reports. No CPU is spent on classification. All four user-visible surfaces degrade cleanly: no task column, no task header tag, no per-turn headings, and the `--axis task_type` heatmap exits 1 with a descriptive error.

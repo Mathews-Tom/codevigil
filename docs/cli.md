@@ -384,7 +384,7 @@ Retrospective, post-mortem view of stored session reports from the `SessionStore
 
 Lists all stored sessions in a rich formatted table. Reads all sessions from the store in a single pass — no per-row disk reads after the initial enumeration.
 
-**Columns:** `session_id` (short, 12-char), `project`, `started_at`, `duration`, `severity`, `model`, `permission_mode`, `metrics_summary` (top-2 metrics by absolute value).
+**Columns:** `session_id` (short, 12-char), `project`, `started_at`, `duration`, `severity`, `model`, `permission_mode`, `metrics_summary` (top-2 metrics by absolute value), `task_type [experimental]` (hidden when no session in the result set has a classifier-derived task type — see [classifier.md](classifier.md)).
 
 **Flags:**
 
@@ -396,6 +396,9 @@ Lists all stored sessions in a rich formatted table. Reads all sessions from the
 | `--severity {ok,warn,crit}` | Filter by worst-metric severity across all metrics in the session.         |
 | `--model MODEL`             | Filter by model identifier (exact match).                                  |
 | `--permission-mode MODE`    | Filter by permission mode (exact match).                                   |
+| `--task-type NAME`          | Filter by classifier-derived task type label (exact match, e.g. `debug_loop`, `exploration`). Sessions with no task type are excluded. Requires `classifier.enabled = true`. |
+
+**task_type column visibility.** The `task_type` column is hidden entirely — not just empty — when no session in the result set has a task type value. This preserves backward compatibility with history stores created before the classifier was enabled. The column header reads `task_type [experimental]` when the classifier is in experimental mode (the default).
 
 **Severity classification** maps metric values to labels using the same thresholds as the watch-mode collectors:
 
@@ -420,6 +423,10 @@ codevigil history list --severity crit
 
 # Filter by model
 codevigil history list --model gpt-4.1
+
+# Filter by classifier task type
+codevigil history list --task-type debug_loop
+codevigil history list --task-type exploration --since 2026-04-01
 ```
 
 **Exit codes:**
@@ -433,9 +440,10 @@ Renders a single stored session in detail using `rich.panel.Panel` and `rich.tab
 
 **Output sections:**
 
-1. **Header block** — session id, project, model, permission_mode, started_at, duration, event count, parse confidence, final severity.
+1. **Header block** — session id, project, model, permission_mode, started_at, duration, event count, parse confidence, final severity. When the session carries a classifier-derived task type, a `task_type: <label> [experimental]` line appears in the header.
 2. **Metrics table** — one row per metric: name, value (4 decimal places), severity label.
-3. **Stop-phrase context snippets** — when present in the session detail.
+3. **Turn Task Types** — when the session carries per-turn classifier data, a panel shows one heading per turn: `Turn N: [<label>] [experimental]`. Absent when the classifier was disabled at session capture time.
+4. **Stop-phrase context snippets** — when present in the session detail.
 
 **Examples:**
 
@@ -471,18 +479,30 @@ codevigil history diff agent-abc123 agent-def456
 
 ### `history heatmap <SESSION_ID>`
 
-Renders a metric × severity matrix for a single session using `rich.table.Table`. Each row is one metric; columns are `ok`, `warn`, and `crit`; the cell in the session's actual severity bucket shows the metric value, other cells show `—`.
+Renders a metric x severity matrix for a single session using `rich.table.Table`. Each row is one metric; columns are `ok`, `warn`, and `crit`; the cell in the session's actual severity bucket shows the metric value, other cells show `—`.
+
+**Flags:**
+
+| Flag                    | Description                                                                               |
+| ----------------------- | ----------------------------------------------------------------------------------------- |
+| `--axis {severity,task_type}` | Heatmap axis. Default `severity` renders the single-session metric x severity matrix. `--axis task_type` [experimental] cross-tabulates metric means across all stored sessions grouped by classifier task type. Requires `classifier.enabled = true`. |
+
+**`--axis task_type` details.** Groups all sessions in the store by their `session_task_type` label. Sessions with no task type appear under `(unclassified)`. Each cell shows the mean metric value across sessions with that task type. The table title carries an `[experimental]` badge. Exits 1 with a descriptive error if the classifier is disabled.
 
 **Examples:**
 
 ```bash
+# Single-session metric x severity heatmap (default)
 codevigil history heatmap agent-abc123
+
+# Cross-tab of metric means by task type across all sessions
+codevigil history heatmap --axis task_type agent-abc123
 ```
 
 **Exit codes:**
 
 - `0` — success
-- `1` — session id not found in the store
+- `1` — session id not found in the store (severity axis), or classifier is disabled (task_type axis)
 
 ---
 
