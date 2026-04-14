@@ -22,6 +22,7 @@ The default config tree has these top-level sections:
 - [`[logging]`](#logging) — error log file path
 - [`[bootstrap]`](#bootstrap) — threshold calibration window
 - [`[storage]`](#storage) — opt-in session-report persistence
+- [`[classifier]`](#classifier) — turn-level task classifier (experimental)
 
 ## `[watch]`
 
@@ -148,6 +149,38 @@ For **high-is-worse** metrics (`stop_phrase`, `reasoning_loop`): the hard cap is
 For **low-is-worse** metrics (`read_edit_ratio`): the hard cap is a **looseness floor**. Bootstrap picks the p20 (WARN) and p5 (CRITICAL) of your local distribution, then applies `max(p20, warn_cap)` and `min(p5, critical_cap)`. Bootstrap can relax toward your observed normal, but can never strictify past your configured cap.
 
 The practical implication: a user who sets `warn_threshold = 5.0` for `read_edit_ratio` will never see bootstrap move the warning trigger above `5.0`, even if their sessions routinely produce ratios of `3.0`. The explicit threshold acts as the looseness floor. This is intentional — user-supplied values signal intent, and bootstrap must respect the intent's direction.
+
+## `[classifier]`
+
+Controls the turn-level task classifier. This is an **experimental** feature; the category labels and cascade rules may change between minor releases.
+
+| Key            | Type   | Default | Description                                                                                                                                                                      |
+| -------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled`      | `bool` | `true`  | When `true`, each completed turn is classified via the two-stage cascade and `session_task_type` / `turn_task_types` are written to the session report. Set to `false` to skip classification entirely; both fields will be `null` in the report. |
+| `experimental` | `bool` | `true`  | Marks the feature as experimental. Flip to `false` after you have validated the category labels against your own session corpus. Has no effect on runtime behaviour; it is metadata for dashboards and report consumers. |
+
+### Disabling the classifier
+
+```toml
+[classifier]
+enabled = false
+```
+
+When disabled, `session_task_type` and `turn_task_types` are `null` in every session report written by `codevigil watch`. No CPU is spent on classification.
+
+### Category labels
+
+The classifier assigns one of five labels to each turn, then aggregates to session level by majority vote:
+
+| Label           | Meaning                                                  |
+| --------------- | -------------------------------------------------------- |
+| `exploration`   | Read-heavy investigation with minimal or no mutations.   |
+| `mutation_heavy`| Three or more file-write operations with no bash calls.  |
+| `debug_loop`    | Bash execution co-present with file mutations (fix/run). |
+| `planning`      | Pure text turn — no tool calls at all.                   |
+| `mixed`         | No single category exceeds 50 % of classified turns.     |
+
+See [`docs/classifier.md`](classifier.md) for the full cascade algorithm and rule specifications.
 
 ## `[storage]`
 

@@ -69,7 +69,7 @@ Five categories cover the observed distribution of Claude Code sessions. Each is
 
 ### `mixed`
 
-**Definition.** The default label when no single category holds more than 50% of the turn-level tags in a session. Also applied to sessions with fewer than 3 turns (insufficient signal).
+**Definition.** The default label when no single category holds more than 50% of the turn-level tags in a session. Also applied to sessions with fewer than 2 labelled turns (insufficient signal). The floor is 2 rather than 3 because the labeled fixture corpus shows that 2-turn sessions carry deterministic structural signal (a single mutation-heavy or debug-loop turn paired with a confirming follow-up), whereas 1-turn sessions never do.
 
 **Tool-presence signature.** No distinctive pattern; may contain turns classified as multiple different categories.
 
@@ -90,7 +90,7 @@ The turn closes when the next user message arrives, or when the session ends (wh
 
 Formally: `turn_i = [user_message_i, (thinking_block* | tool_call | tool_result | assistant_message)*]` where `*` denotes zero or more occurrences and the sequence is ordered by event timestamp.
 
-**Session aggregate.** A session containing N turns is tagged with the category that holds the majority of turn-level labels (count > N/2). If no single category exceeds 50% of turns, the session receives the `mixed` label. Sessions with fewer than 3 turns default to `mixed` regardless of individual turn labels; the signal is insufficient to draw a session-level conclusion.
+**Session aggregate.** A session containing N turns is tagged with the category that holds the majority of turn-level labels (count > N/2). If no single category exceeds 50% of turns, the session receives the `mixed` label. Sessions with fewer than 2 labelled turns default to `mixed` regardless of individual turn labels; the signal is insufficient to draw a session-level conclusion.
 
 **Tie handling.** When two categories are tied at exactly N/2 turns each (only possible when N is even), `mixed` wins. Ties are expected to be rare in practice; if they are common it signals that the category boundaries need revision.
 

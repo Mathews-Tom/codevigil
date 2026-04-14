@@ -223,6 +223,30 @@ class SessionReport:
             return None
         return tuple(_deserialise_turn(t) for t in raw)
 
+    @property
+    def session_task_type(self) -> str | None:
+        """Session-level aggregate task type, or ``None`` when not classified.
+
+        ``None`` for records written before Phase 5, or when
+        ``classifier.enabled = false``. One of the category names in
+        ``TASK_CATEGORIES`` when present.
+        """
+        v = self._data.get("session_task_type")
+        return str(v) if v is not None else None
+
+    @property
+    def turn_task_types(self) -> tuple[str, ...] | None:
+        """Per-turn task type labels in turn order, or ``None`` when absent.
+
+        ``None`` for records written before Phase 5, or when
+        ``classifier.enabled = false``. Each element is one of the category
+        names in ``TASK_CATEGORIES``.
+        """
+        raw = self._data.get("turn_task_types")
+        if raw is None:
+            return None
+        return tuple(str(t) for t in raw)
+
     def as_dict(self) -> dict[str, Any]:
         """Return a JSON-serialisable copy of the underlying data."""
         return dict(self._data)
@@ -248,16 +272,18 @@ def build_report(
     eviction_churn: int = 0,
     cohort_size: int = 0,
     turns: tuple[Turn, ...] | None = None,
+    session_task_type: str | None = None,
+    turn_task_types: tuple[str, ...] | None = None,
 ) -> SessionReport:
     """Construct a :class:`SessionReport` from aggregator-supplied values.
 
     This is the intended construction path for the aggregator's ingest path.
     Tests may also call it directly with synthetic data.
 
-    The ``turns`` parameter is optional (default ``None``). When supplied it is
-    serialised to a list of dicts inside the JSON blob. Pre-upgrade records
-    that lack the ``turns`` key read back with ``SessionReport.turns == None``
-    — no migration is required.
+    The ``turns``, ``session_task_type``, and ``turn_task_types`` parameters
+    are all optional (default ``None``). Pre-upgrade records that lack these
+    keys read back with the corresponding ``SessionReport`` properties as
+    ``None`` — no migration is required.
     """
     duration = (ended_at - started_at).total_seconds()
     data: dict[str, Any] = {
@@ -278,6 +304,10 @@ def build_report(
     }
     if turns is not None:
         data["turns"] = [_serialise_turn(t) for t in turns]
+    if session_task_type is not None:
+        data["session_task_type"] = session_task_type
+    if turn_task_types is not None:
+        data["turn_task_types"] = list(turn_task_types)
     _validate_record(data)
     return SessionReport(data)
 
