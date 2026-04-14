@@ -14,6 +14,11 @@ Columns:
 - ``model`` — model identifier or ``—``
 - ``permission_mode`` — permission mode or ``—``
 - ``metrics_summary`` — top-2 metrics by absolute value (``metric=val, …``)
+- ``task_type`` — session task label from classifier (hidden when no session
+  in the result set has a task type; shown with ``[experimental]`` badge when
+  present). The column is absent entirely — not just empty — when no session
+  carries a task type, preserving backward compatibility with pre-classifier
+  history.
 """
 
 from __future__ import annotations
@@ -24,6 +29,7 @@ from pathlib import Path
 from typing import Any
 
 import rich.console
+import rich.markup
 import rich.table
 
 from codevigil.analysis.store import SessionReport, SessionStore
@@ -39,6 +45,9 @@ from codevigil.history.filters import (
 
 _SEV_STYLE: dict[str, str] = {"ok": "green", "warn": "yellow", "crit": "red"}
 
+# Badge appended to task label values when the classifier is experimental.
+_EXPERIMENTAL_BADGE: str = "[experimental]"
+
 
 def run_list(
     *,
@@ -49,6 +58,8 @@ def run_list(
     severity: SeverityLabel | None = None,
     model: str | None = None,
     permission_mode: str | None = None,
+    task_type: str | None = None,
+    classifier_experimental: bool = True,
     thresholds: dict[str, tuple[float, float]] | None = None,
     out: Any = None,
 ) -> int:
@@ -64,6 +75,11 @@ def run_list(
         severity: Filter by worst-severity label.
         model: Filter by model identifier.
         permission_mode: Filter by permission mode.
+        task_type: Filter by session task type label (exact match). Sessions
+            with no task type are excluded when this is set.
+        classifier_experimental: When ``True``, task type values are
+            annotated with ``[experimental]``. Set from
+            ``classifier.experimental`` config key.
         thresholds: Per-metric (warn, crit) thresholds for severity
             classification. ``None`` uses built-in defaults.
         out: Output stream. Defaults to ``sys.stdout``.
@@ -86,15 +102,25 @@ def run_list(
         severity=severity,
         model=model,
         permission_mode=permission_mode,
+        task_type=task_type,
         thresholds=thresholds,
     )
 
     console = rich.console.Console(file=out, highlight=False)
-    console.print(_build_table(filtered))
+    console.print(_build_table(filtered, classifier_experimental=classifier_experimental))
     return 0
 
 
-def _build_table(reports: list[SessionReport]) -> rich.table.Table:
+def _build_table(
+    reports: list[SessionReport],
+    *,
+    classifier_experimental: bool = True,
+) -> rich.table.Table:
+    # Determine whether the task_type column should be shown: only when at
+    # least one session in the result set has a non-None session_task_type.
+    # "Hidden" means the column header itself is absent, not just empty cells.
+    show_task_col = any(r.session_task_type is not None for r in reports)
+
     tbl = rich.table.Table(show_header=True, header_style="bold")
     tbl.add_column("session_id")
     tbl.add_column("project")
@@ -104,6 +130,12 @@ def _build_table(reports: list[SessionReport]) -> rich.table.Table:
     tbl.add_column("model")
     tbl.add_column("permission_mode")
     tbl.add_column("metrics_summary")
+    if show_task_col:
+        # Column header carries the [experimental] badge when the flag is set.
+        # rich.markup.escape prevents Rich from interpreting the brackets as a
+        # markup tag and silently swallowing the text.
+        badge = " " + rich.markup.escape("[experimental]") if classifier_experimental else ""
+        tbl.add_column(f"task_type{badge}")
 
     for report in reports:
         project_display = report.project_name or report.project_hash or "—"
@@ -115,7 +147,7 @@ def _build_table(reports: list[SessionReport]) -> rich.table.Table:
         pmode_display = report.permission_mode or "—"
         metrics_col = top_metrics_summary(report.metrics, n=2)
 
-        tbl.add_row(
+        row: tuple[str, ...] = (
             short_id(report.session_id),
             project_display,
             started,
@@ -125,6 +157,12 @@ def _build_table(reports: list[SessionReport]) -> rich.table.Table:
             pmode_display,
             metrics_col,
         )
+
+        if show_task_col:
+            task_val = report.session_task_type or "—"
+            row = (*row, task_val)
+
+        tbl.add_row(*row)
 
     return tbl
 
