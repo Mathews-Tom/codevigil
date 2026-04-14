@@ -52,3 +52,20 @@ class TestHeatmapPresent:
         err = io.StringIO()
         run_heatmap("agent-heat2", store_dir=tmp_path, out=out, err=err)
         assert "stop_phrase" in out.getvalue()
+
+    def test_cells_render_gradient_bars(self, tmp_path: Path) -> None:
+        """Cells show Unicode block glyphs, not raw numeric strings."""
+        store = SessionStore(base_dir=tmp_path)
+        _write_session(
+            store,
+            "agent-heat3",
+            metrics={"stop_phrase": 0.0, "read_edit_ratio": 4.0},
+        )
+        out = io.StringIO()
+        run_heatmap("agent-heat3", store_dir=tmp_path, out=out)
+        text = out.getvalue()
+        # At least one gradient glyph must appear in the rendered output.
+        assert "█" in text
+        # Numeric metric values must not appear as raw decimal strings.
+        assert "4.0000" not in text
+        assert "0.0000" not in text
