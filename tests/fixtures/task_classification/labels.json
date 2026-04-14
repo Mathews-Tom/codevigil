@@ -1,0 +1,67 @@
+{
+  "version": "1",
+  "description": "Hand-labeled task categories for the Phase 0 calibration corpus. Labels use the category names defined in the Phase 3 design proposal. Each entry labels the entire session at aggregate level; turn-level labeling is deferred to Phase 5 calibration.",
+  "categories": ["exploration", "mutation_heavy", "debug_loop", "planning", "mixed"],
+  "sessions": [
+    {
+      "session_id": "fixture-cls-exp-01",
+      "file": "session_exploration_01.jsonl",
+      "label": "exploration",
+      "rationale": "Entirely Read/Grep tool calls with no mutations. User goal is to understand the authentication flow, not change it."
+    },
+    {
+      "session_id": "fixture-cls-exp-02",
+      "file": "session_exploration_02.jsonl",
+      "label": "exploration",
+      "rationale": "Read-only investigation of the config precedence system. No edits or writes performed."
+    },
+    {
+      "session_id": "fixture-cls-mut-01",
+      "file": "session_mutation_heavy_01.jsonl",
+      "label": "mutation_heavy",
+      "rationale": "Five Edit calls and one Write call dominate the session. High ratio of mutation tools to read tools."
+    },
+    {
+      "session_id": "fixture-cls-mut-02",
+      "file": "session_mutation_heavy_02.jsonl",
+      "label": "mutation_heavy",
+      "rationale": "Six consecutive Edit calls and one Write. No test run between mutations; pure mechanical annotation task."
+    },
+    {
+      "session_id": "fixture-cls-dbg-01",
+      "file": "session_debug_loop_01.jsonl",
+      "label": "debug_loop",
+      "rationale": "Multiple test runs that fail, each followed by code inspection and a targeted fix. Classic red-fix-run loop."
+    },
+    {
+      "session_id": "fixture-cls-dbg-02",
+      "file": "session_debug_loop_02.jsonl",
+      "label": "debug_loop",
+      "rationale": "Iterative import error diagnosis: run → inspect → fix → re-run. Short loop but canonical debug pattern."
+    },
+    {
+      "session_id": "fixture-cls-plan-01",
+      "file": "session_planning_01.jsonl",
+      "label": "planning",
+      "rationale": "User explicitly asks for a recommendation. Session produces a written plan and design document with no code changes."
+    },
+    {
+      "session_id": "fixture-cls-plan-02",
+      "file": "session_planning_02.jsonl",
+      "label": "planning",
+      "rationale": "Architectural discussion about migration strategy. No code mutations; assistant produces a phased plan."
+    },
+    {
+      "session_id": "fixture-cls-mix-01",
+      "file": "session_mixed_01.jsonl",
+      "label": "mixed",
+      "rationale": "Begins with exploration (Glob + Read to understand logging), transitions to mutation (Edit), and includes a verification run. Spans multiple task types."
+    },
+    {
+      "session_id": "fixture-cls-mix-02",
+      "file": "session_mixed_02.jsonl",
+      "label": "mixed",
+      "rationale": "Opens with a planning discussion, then immediately implements the plan (Write + Edit). No single category dominates."
+    }
+  ]
+}
