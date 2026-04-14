@@ -597,11 +597,18 @@ def _make_20_session_fixture() -> list[tuple[SessionMeta, list[MetricSnapshot]]]
 
 
 def test_20_session_fixture_renders_deterministically() -> None:
-    """Two ticks with the same fixture must produce identical output."""
+    """Two ticks with the same fixture must produce identical output.
+
+    The fleet header now embeds a wall-clock timestamp via TerminalRenderer's
+    injectable clock.  Both renderers must share a single fixed clock so that
+    back-to-back ticks never straddle a second boundary and produce divergent
+    header lines.
+    """
     fixture = _make_20_session_fixture()
+    fixed_clock = lambda: datetime(2025, 1, 1, 12, 0, 0, tzinfo=UTC)  # noqa: E731
 
     stream1 = io.StringIO()
-    renderer1 = TerminalRenderer(stream=stream1, use_color=False)
+    renderer1 = TerminalRenderer(stream=stream1, use_color=False, clock=fixed_clock)
     renderer1.begin_tick()
     for meta, snaps in fixture:
         renderer1.render(snaps, meta)
@@ -609,7 +616,7 @@ def test_20_session_fixture_renders_deterministically() -> None:
     tick1 = stream1.getvalue()
 
     stream2 = io.StringIO()
-    renderer2 = TerminalRenderer(stream=stream2, use_color=False)
+    renderer2 = TerminalRenderer(stream=stream2, use_color=False, clock=fixed_clock)
     renderer2.begin_tick()
     for meta, snaps in fixture:
         renderer2.render(snaps, meta)
