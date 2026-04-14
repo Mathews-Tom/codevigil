@@ -133,12 +133,14 @@ Batch analysis over one or more session files. With no cohort flags, walks the i
 
 | Flag                       | Description                                                                     |
 | -------------------------- | ------------------------------------------------------------------------------- |
-| `--from YYYY-MM-DD`        | Drop sessions whose first event timestamp is strictly before this date.         |
-| `--to YYYY-MM-DD`          | Drop sessions whose first event timestamp is strictly after this date.          |
+| `--from YYYY-MM-DD`        | Filter at the **event** level: discard individual events whose timestamp is strictly before this date. Sessions that straddle this boundary contribute only their in-window events; `started_at` is clamped to the first in-window event. Sessions with zero in-window events are omitted entirely. |
+| `--to YYYY-MM-DD`          | Filter at the **event** level: discard individual events whose timestamp is strictly after this date. Sessions that straddle this boundary contribute only their in-window events; `ended_at` is clamped to the last in-window event. Sessions with zero in-window events are omitted entirely. |
 | `--format {json,markdown}` | Output format for the per-session report. Default `json`.                       |
 | `--output DIR`             | Override the report output directory. Must resolve under `$HOME`.               |
 | `--group-by DIMENSION`     | Produce a cohort trend table. See below. Incompatible with `--compare-periods`. |
 | `--compare-periods RANGES` | Compare two date ranges. See below. Incompatible with `--group-by`.             |
+
+> **Note on `--from`/`--to` granularity.** These flags operate at the individual event timestamp, not at the session boundary. A session that runs from 23:50 to 00:10 across midnight will appear in both `--to 2026-01-01` (pre-midnight events only) and `--from 2026-01-02` (post-midnight events only) reports, each with a clamped `started_at`/`ended_at` that reflects the in-window portion. This behaviour differs from prior versions, which dropped or kept entire sessions based on the session's first event timestamp. Reports generated with narrow date windows over sessions that straddle those windows will show different (lower) event counts and metric values than reports with no date filter.
 
 ### JSON output shape
 

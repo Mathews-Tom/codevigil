@@ -518,9 +518,13 @@ def _run_report_group_by(
 
     since_date = _parse_date_only(getattr(args, "from_date", None))
     until_date = _parse_date_only(getattr(args, "to_date", None))
+    from_dt = _parse_date_filter(getattr(args, "from_date", None), end_of_day=False)
+    to_dt = _parse_date_filter(getattr(args, "to_date", None), end_of_day=True)
 
     paths = expand_to_jsonl_paths(args.path)
-    store_reports = load_reports_from_jsonl(paths, cfg=cfg)
+    store_reports = load_reports_from_jsonl(
+        paths, cfg=cfg, from_timestamp=from_dt, to_timestamp=to_dt
+    )
 
     payload = render_group_by_report(
         store_reports,
@@ -563,6 +567,10 @@ def _run_report_compare_periods(
         return 2
 
     paths = expand_to_jsonl_paths(args.path)
+    # No --from/--to date filtering at the event level for compare-periods:
+    # that path already splits sessions by period-date ranges at the renderer
+    # level. Event-level filtering is transparent here because we load all
+    # sessions and let the renderer bucket them by session-level started_at.
     store_reports = load_reports_from_jsonl(paths, cfg=cfg)
 
     payload = render_compare_periods_report(
