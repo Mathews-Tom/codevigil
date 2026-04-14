@@ -28,6 +28,7 @@ import rich.table
 
 from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.history.filters import classify_metric_severity
+from codevigil.renderers._bars import render_gradient_bar
 
 # Valid axis choices for --axis.
 _VALID_AXES: frozenset[str] = frozenset({"severity", "task_type"})
@@ -107,11 +108,25 @@ def _render_heatmap(report: SessionReport, *, out: Any) -> None:
     tbl.add_column("warn (value)", justify="right", style="yellow")
     tbl.add_column("crit (value)", justify="right", style="red")
 
+    # Pre-compute per-column maximums for proportional bars.
+    ok_max = max(
+        (v for n, v in report.metrics.items() if classify_metric_severity(n, v) == "ok"),
+        default=1.0,
+    )
+    warn_max = max(
+        (v for n, v in report.metrics.items() if classify_metric_severity(n, v) == "warn"),
+        default=1.0,
+    )
+    crit_max = max(
+        (v for n, v in report.metrics.items() if classify_metric_severity(n, v) == "crit"),
+        default=1.0,
+    )
+
     for name, value in sorted(report.metrics.items()):
         sev = classify_metric_severity(name, value)
-        ok_val = f"{value:.4f}" if sev == "ok" else "—"
-        warn_val = f"{value:.4f}" if sev == "warn" else "—"
-        crit_val = f"{value:.4f}" if sev == "crit" else "—"
+        ok_val = render_gradient_bar(value, ok_max) if sev == "ok" else "—"
+        warn_val = render_gradient_bar(value, warn_max) if sev == "warn" else "—"
+        crit_val = render_gradient_bar(value, crit_max) if sev == "crit" else "—"
         tbl.add_row(name, ok_val, warn_val, crit_val)
 
     console.print(tbl)
@@ -161,13 +176,19 @@ def _render_task_type_crosstab(
     for tt in task_types:
         tbl.add_column(tt, justify="right")
 
+    # Pre-compute per task_type column maximums for proportional bars.
+    col_max: dict[str, float] = {}
+    for tt in task_types:
+        vals_across_metrics = [sum(vs) / len(vs) for vs in accum[tt].values() if vs]
+        col_max[tt] = max(vals_across_metrics, default=1.0)
+
     for mname in sorted_metrics:
         row_vals: list[str] = [mname]
         for tt in task_types:
             vals = accum[tt].get(mname, [])
             if vals:
                 mean_val = sum(vals) / len(vals)
-                row_vals.append(f"{mean_val:.4f}")
+                row_vals.append(render_gradient_bar(mean_val, col_max[tt]))
             else:
                 row_vals.append("—")
         tbl.add_row(*row_vals)

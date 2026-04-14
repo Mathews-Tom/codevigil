@@ -162,8 +162,10 @@ class TestHeatmapTaskTypeAxis:
             out=out,
         )
         text = out.getvalue()
-        # 7.0000 is the expected mean.
-        assert "7.0000" in text
+        # Mean is 7.0 — the only metric in the column, so col_max == 7.0 and the
+        # bar renders fully filled.  Assert proportional bar glyphs are present
+        # rather than the raw numeric string (cells now show gradient bars).
+        assert "█" in text
 
 
 class TestHeatmapTaskAxisDisabled:
