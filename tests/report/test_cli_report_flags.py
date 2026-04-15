@@ -165,9 +165,7 @@ class TestGroupByWeekCLI:
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
         body = (
-            (tmp_path / "home" / "reports" / "cohort_week.md")
-            .read_text(encoding="utf-8")
-            .lower()
+            (tmp_path / "home" / "reports" / "cohort_week.md").read_text(encoding="utf-8").lower()
         )
         from codevigil.report.renderer import BANNED_CAUSAL_WORDS
 

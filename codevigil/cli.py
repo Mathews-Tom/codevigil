@@ -39,8 +39,9 @@ from typing import Any
 
 from codevigil import __version__
 from codevigil.aggregator import SessionAggregator
-from codevigil.analysis.cohort import VALID_DIMENSIONS
-from codevigil.analysis.store import SessionStore
+from codevigil.analysis.cohort import VALID_DIMENSIONS, CohortCell, CohortSlice
+from codevigil.analysis.compare import ComparisonResult, MetricComparison
+from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.bootstrap import BootstrapManager
 from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
 from codevigil.errors import CodevigilError, ErrorLevel
@@ -1142,8 +1143,8 @@ def _run_report_group_by(
 
 def _format_cohort_summary(
     *,
-    cohort: Any,
-    reports: list[Any],
+    cohort: CohortSlice,
+    reports: list[SessionReport],
     dimension: str,
     fmt: str,
     out_path: Path,
@@ -1208,7 +1209,7 @@ class _MetricMover:
         return f"{sign}{self.pct_change:.1f}%"
 
 
-def _compute_top_movers(cohort: Any, *, limit: int = 5) -> list[_MetricMover]:
+def _compute_top_movers(cohort: CohortSlice, *, limit: int = 5) -> list[_MetricMover]:
     """Return the top-``limit`` metrics ranked by |first→last percent change|.
 
     A metric qualifies only when its earliest and latest guarded buckets
@@ -1216,27 +1217,21 @@ def _compute_top_movers(cohort: Any, *, limit: int = 5) -> list[_MetricMover]:
     and live in different buckets. Sorted by absolute percent change
     descending.
     """
-    if not cohort.cells:
-        return []
-    chronological = cohort.dimension in {"day", "week"}
-    if not chronological:
+    if not cohort.cells or cohort.dimension not in {"day", "week"}:
         return []
 
-    by_metric: dict[str, list[Any]] = {}
+    by_metric: dict[str, list[CohortCell]] = {}
     for cell in cohort.cells:
-        if cell.n < 5:
-            continue
-        by_metric.setdefault(cell.metric_name, []).append(cell)
+        if cell.n >= 5:
+            by_metric.setdefault(cell.metric_name, []).append(cell)
 
     movers: list[_MetricMover] = []
     for metric, cells in by_metric.items():
-        cells.sort(key=lambda c: c.dimension_value)
-        if len(cells) < 2:
+        ordered = sorted(cells, key=lambda c: c.dimension_value)
+        if len(ordered) < 2:
             continue
-        first, last = cells[0], cells[-1]
-        if first.dimension_value == last.dimension_value:
-            continue
-        if first.mean == 0:
+        first, last = ordered[0], ordered[-1]
+        if first.dimension_value == last.dimension_value or first.mean == 0:
             continue
         pct = (last.mean - first.mean) / abs(first.mean) * 100.0
         movers.append(
@@ -1348,7 +1343,7 @@ def _format_compare_summary(
     period_a: tuple[date, date],
     period_b: tuple[date, date],
     n_total: int,
-    comparison: Any | None = None,
+    comparison: ComparisonResult | None = None,
     label_a: str = "A",
     label_b: str = "B",
 ) -> str:
@@ -1367,11 +1362,15 @@ def _format_compare_summary(
             lines.append("")
             lines.append(f"top movers ({label_a} → {label_b}, |Δ%| ranked):")
             for mc in movers:
-                sign = "+" if mc.delta_pct >= 0 else ""
+                # _rank_comparison_movers filters out None delta_pct, so this
+                # narrowing is safe — assigning to a local variable lets the
+                # type checker prove it without a redundant check.
+                pct = mc.delta_pct if mc.delta_pct is not None else 0.0
+                sign = "+" if pct >= 0 else ""
                 sig = " *" if mc.significant else ""
                 lines.append(
                     f"  {mc.metric_name:<32} {mc.mean_a:>10.3f} → {mc.mean_b:>10.3f}  "
-                    f"({sign}{mc.delta_pct:.1f}%){sig}"
+                    f"({sign}{pct:.1f}%){sig}"
                 )
             lines.append("")
             lines.append("note: * = Welch's t-test p<0.05; descriptive only, not causal.")
@@ -1379,7 +1378,11 @@ def _format_compare_summary(
     return "\n".join(lines)
 
 
-def _rank_comparison_movers(result: Any, *, limit: int = 5) -> list[Any]:
+def _rank_comparison_movers(
+    result: ComparisonResult,
+    *,
+    limit: int = 5,
+) -> list[MetricComparison]:
     """Sort ``MetricComparison`` entries by |delta_pct| descending.
 
     Skips metrics where either period falls under the n>=5 guard or
@@ -1388,7 +1391,7 @@ def _rank_comparison_movers(result: Any, *, limit: int = 5) -> list[Any]:
     candidates = [
         mc for mc in result.metrics if mc.delta_pct is not None and mc.n_a >= 5 and mc.n_b >= 5
     ]
-    candidates.sort(key=lambda mc: abs(mc.delta_pct), reverse=True)
+    candidates.sort(key=lambda mc: abs(mc.delta_pct or 0.0), reverse=True)
     return candidates[:limit]
 
 

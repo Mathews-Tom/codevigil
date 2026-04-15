@@ -38,7 +38,7 @@ import io
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 import rich.console
 import rich.panel
@@ -448,7 +448,7 @@ def _format_cell(
     cell: CohortCell | None,
     *,
     prior_mean: float | None = None,
-    thresholds: tuple[float | None, float | None, str] | None = None,
+    thresholds: tuple[float | None, float | None, _ThresholdDirection] | None = None,
 ) -> str:
     """Format a cohort cell as ``mean ± stdev (n)`` plus optional Δ and severity.
 
@@ -493,7 +493,8 @@ def _format_cell(
     return base
 
 
-_ThresholdDirection = str  # "high" | "low"
+_ThresholdDirection = Literal["high", "low"]
+_Severity = Literal["critical", "warn", "ok"]
 
 
 def _classify_threshold(
@@ -501,7 +502,7 @@ def _classify_threshold(
     warn: float | None,
     critical: float | None,
     direction: _ThresholdDirection,
-) -> str:
+) -> _Severity:
     """Return ``"critical"``, ``"warn"``, or ``"ok"`` for a metric value.
 
     ``direction="high"`` flags values at or above the threshold (used by
@@ -515,12 +516,11 @@ def _classify_threshold(
         if warn is not None and value >= warn:
             return "warn"
         return "ok"
-    if direction == "low":
-        if critical is not None and value < critical:
-            return "critical"
-        if warn is not None and value < warn:
-            return "warn"
-        return "ok"
+    # direction == "low"
+    if critical is not None and value < critical:
+        return "critical"
+    if warn is not None and value < warn:
+        return "warn"
     return "ok"
 
 
