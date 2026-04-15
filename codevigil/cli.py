@@ -1125,10 +1125,132 @@ def _run_report_group_by(
         target=out_name,
     )
     _write_report(out_path, payload)
-    sys.stdout.write(payload)
+    sys.stdout.write(
+        _format_cohort_summary(
+            cohort=cohort,
+            reports=filtered,
+            dimension=dimension,
+            fmt=fmt,
+            out_path=out_path,
+            payload_bytes=len(payload.encode("utf-8")),
+        )
+    )
     sys.stdout.flush()
     reporter.finish(message="group-by report complete")
     return 0
+
+
+def _format_cohort_summary(
+    *,
+    cohort: Any,
+    reports: list[Any],
+    dimension: str,
+    fmt: str,
+    out_path: Path,
+    payload_bytes: int,
+) -> str:
+    """Build a one-screen summary instead of dumping the whole report.
+
+    Shows file metadata (path, size, sessions, range, dimension, cells)
+    plus a short analytical block: the top movers between the first and
+    last guarded bucket. Movers are ranked by absolute percentage
+    change so headline regressions surface even when the metric scale
+    is tiny.
+    """
+    bucket_count = len({c.dimension_value for c in cohort.cells})
+    metric_count = len({c.metric_name for c in cohort.cells})
+    redacted = sum(1 for c in cohort.cells if c.n < 5)
+
+    if reports:
+        dates = [r.started_at.date() for r in reports]
+        date_range = f"{min(dates)}..{max(dates)}"
+    else:
+        date_range = "no sessions"
+
+    size_kb = payload_bytes / 1024.0
+    lines = [
+        f"cohort report ({fmt}) written",
+        f"  path:       {out_path}",
+        f"  size:       {size_kb:.1f} KiB",
+        f"  sessions:   {len(reports)}",
+        f"  range:      {date_range}",
+        f"  group-by:   {dimension} ({bucket_count} bucket(s))",
+        f"  metrics:    {metric_count}",
+        f"  cells:      {len(cohort.cells)} ({redacted} redacted as n<5)",
+    ]
+    movers = _compute_top_movers(cohort)
+    if movers:
+        first_label, last_label = movers[0].window_labels
+        lines.append("")
+        lines.append(f"top movers ({first_label} → {last_label}, |Δ%| ranked):")
+        for mover in movers:
+            lines.append(
+                f"  {mover.metric:<32} {mover.first_mean:>10.3f} → {mover.last_mean:>10.3f}  "
+                f"({mover.signed_pct})"
+            )
+        lines.append("")
+        lines.append("note: descriptive deltas only; not causal claims.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+@dataclass
+class _MetricMover:
+    metric: str
+    first_mean: float
+    last_mean: float
+    pct_change: float
+    window_labels: tuple[str, str]
+
+    @property
+    def signed_pct(self) -> str:
+        sign = "+" if self.pct_change >= 0 else ""
+        return f"{sign}{self.pct_change:.1f}%"
+
+
+def _compute_top_movers(cohort: Any, *, limit: int = 5) -> list[_MetricMover]:
+    """Return the top-``limit`` metrics ranked by |first→last percent change|.
+
+    A metric qualifies only when its earliest and latest guarded buckets
+    (n>=5) have non-zero earliest mean (so percent change is defined)
+    and live in different buckets. Sorted by absolute percent change
+    descending.
+    """
+    if not cohort.cells:
+        return []
+    chronological = cohort.dimension in {"day", "week"}
+    if not chronological:
+        return []
+
+    by_metric: dict[str, list[Any]] = {}
+    for cell in cohort.cells:
+        if cell.n < 5:
+            continue
+        by_metric.setdefault(cell.metric_name, []).append(cell)
+
+    movers: list[_MetricMover] = []
+    for metric, cells in by_metric.items():
+        cells.sort(key=lambda c: c.dimension_value)
+        if len(cells) < 2:
+            continue
+        first, last = cells[0], cells[-1]
+        if first.dimension_value == last.dimension_value:
+            continue
+        if first.mean == 0:
+            continue
+        pct = (last.mean - first.mean) / abs(first.mean) * 100.0
+        movers.append(
+            _MetricMover(
+                metric=metric,
+                first_mean=first.mean,
+                last_mean=last.mean,
+                pct_change=pct,
+                window_labels=(first.dimension_value, last.dimension_value),
+            )
+        )
+
+    movers.sort(key=lambda m: abs(m.pct_change), reverse=True)
+    return movers[:limit]
 
 
 def _run_report_compare_periods(
@@ -1181,6 +1303,13 @@ def _run_report_compare_periods(
     )
     reporter.update(phase="rendering", message="building comparison")
 
+    from codevigil.analysis.cohort import filter_by_period as _filter
+    from codevigil.analysis.compare import compare_periods as _compare_periods
+
+    period_a_reports = _filter(store_reports, since=period_a_since, until=period_a_until)
+    period_b_reports = _filter(store_reports, since=period_b_since, until=period_b_until)
+    comparison = _compare_periods(period_a_reports, period_b_reports)
+
     payload = render_compare_periods_report(
         store_reports,
         period_a_since=period_a_since,
@@ -1195,11 +1324,72 @@ def _run_report_compare_periods(
         message="writing markdown report",
         target="compare_periods.md",
     )
-    _write_report(output_dir / "compare_periods.md", payload)
-    sys.stdout.write(payload)
+    out_path = output_dir / "compare_periods.md"
+    _write_report(out_path, payload)
+    sys.stdout.write(
+        _format_compare_summary(
+            out_path=out_path,
+            payload_bytes=len(payload.encode("utf-8")),
+            period_a=(period_a_since, period_a_until),
+            period_b=(period_b_since, period_b_until),
+            n_total=len(store_reports),
+            comparison=comparison,
+        )
+    )
     sys.stdout.flush()
     reporter.finish(message="compare-periods report complete")
     return 0
+
+
+def _format_compare_summary(
+    *,
+    out_path: Path,
+    payload_bytes: int,
+    period_a: tuple[date, date],
+    period_b: tuple[date, date],
+    n_total: int,
+    comparison: Any | None = None,
+    label_a: str = "A",
+    label_b: str = "B",
+) -> str:
+    size_kb = payload_bytes / 1024.0
+    lines = [
+        f"{label_a}-vs-{label_b} report written",
+        f"  path:       {out_path}",
+        f"  size:       {size_kb:.1f} KiB",
+        f"  sessions:   {n_total} (corpus)",
+        f"  {label_a:<8}:   {period_a[0]}..{period_a[1]}",
+        f"  {label_b:<8}:   {period_b[0]}..{period_b[1]}",
+    ]
+    if comparison is not None:
+        movers = _rank_comparison_movers(comparison)
+        if movers:
+            lines.append("")
+            lines.append(f"top movers ({label_a} → {label_b}, |Δ%| ranked):")
+            for mc in movers:
+                sign = "+" if mc.delta_pct >= 0 else ""
+                sig = " *" if mc.significant else ""
+                lines.append(
+                    f"  {mc.metric_name:<32} {mc.mean_a:>10.3f} → {mc.mean_b:>10.3f}  "
+                    f"({sign}{mc.delta_pct:.1f}%){sig}"
+                )
+            lines.append("")
+            lines.append("note: * = Welch's t-test p<0.05; descriptive only, not causal.")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _rank_comparison_movers(result: Any, *, limit: int = 5) -> list[Any]:
+    """Sort ``MetricComparison`` entries by |delta_pct| descending.
+
+    Skips metrics where either period falls under the n>=5 guard or
+    where ``delta_pct`` is undefined (mean_a == 0).
+    """
+    candidates = [
+        mc for mc in result.metrics if mc.delta_pct is not None and mc.n_a >= 5 and mc.n_b >= 5
+    ]
+    candidates.sort(key=lambda mc: abs(mc.delta_pct), reverse=True)
+    return candidates[:limit]
 
 
 def _run_report_pivot(
@@ -1290,8 +1480,28 @@ def _run_report_pivot(
         message="writing markdown report",
         target=out_name,
     )
-    _write_report(output_dir / out_name, payload)
-    sys.stdout.write(payload)
+    out_path = output_dir / out_name
+    _write_report(out_path, payload)
+
+    from codevigil.analysis.cohort import filter_by_period as _filter
+    from codevigil.analysis.compare import compare_periods as _compare_periods
+
+    before_reports = _filter(store_reports, since=corpus_min, until=before_until)
+    after_reports = _filter(store_reports, since=pivot, until=corpus_max)
+    comparison = _compare_periods(before_reports, after_reports)
+
+    sys.stdout.write(
+        _format_compare_summary(
+            out_path=out_path,
+            payload_bytes=len(payload.encode("utf-8")),
+            period_a=(corpus_min, before_until),
+            period_b=(pivot, corpus_max),
+            n_total=len(store_reports),
+            comparison=comparison,
+            label_a="before",
+            label_b="after",
+        )
+    )
     sys.stdout.flush()
     reporter.finish(message="pivot report complete")
     return 0

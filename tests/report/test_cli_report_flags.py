@@ -140,47 +140,49 @@ class TestGroupByWeekCLI:
         corpus_dir: Path,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
-        captured = capsys.readouterr()
-        assert "# Cohort Trend Report" in captured.out
-        assert "## Methodology" in captured.out
-        assert "## Appendix" in captured.out
+        body = (tmp_path / "home" / "reports" / "cohort_week.md").read_text(encoding="utf-8")
+        assert "# Cohort Trend Report" in body
+        assert "## Methodology" in body
+        assert "## Appendix" in body
 
     def test_methodology_disclaimer_present(
         self,
         corpus_dir: Path,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
-        captured = capsys.readouterr()
-        assert "metrics have not been validated against labeled outcomes" in captured.out.lower()
+        body = (tmp_path / "home" / "reports" / "cohort_week.md").read_text(encoding="utf-8")
+        assert "metrics have not been validated against labeled outcomes" in body.lower()
 
     def test_no_banned_words_in_output(
         self,
         corpus_dir: Path,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
-        captured = capsys.readouterr()
-        lowered = captured.out.lower()
+        body = (
+            (tmp_path / "home" / "reports" / "cohort_week.md")
+            .read_text(encoding="utf-8")
+            .lower()
+        )
         from codevigil.report.renderer import BANNED_CAUSAL_WORDS
 
         for word in BANNED_CAUSAL_WORDS:
-            assert word not in lowered, f"Banned word {word!r} in output"
+            assert word not in body, f"Banned word {word!r} in output"
 
     def test_write_precision_column_present(
         self,
         corpus_dir: Path,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(["report", str(corpus_dir), "--group-by", "week"])
-        captured = capsys.readouterr()
-        assert "Write Precision" in captured.out
+        body = (tmp_path / "home" / "reports" / "cohort_week.md").read_text(encoding="utf-8")
+        assert "Write Precision" in body
 
 
 # ---------------------------------------------------------------------------
@@ -225,8 +227,8 @@ class TestComparePeriodsDataCLI:
     def test_output_contains_required_sections(
         self,
         corpus_dir: Path,
+        tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
-        capsys: pytest.CaptureFixture[str],
     ) -> None:
         main(
             [
@@ -236,10 +238,10 @@ class TestComparePeriodsDataCLI:
                 "2026-03-30:2026-04-05,2026-04-06:2026-04-12",
             ]
         )
-        captured = capsys.readouterr()
-        assert "# Period Comparison" in captured.out
-        assert "## Methodology" in captured.out
-        assert "## Appendix" in captured.out
+        body = (tmp_path / "home" / "reports" / "compare_periods.md").read_text(encoding="utf-8")
+        assert "# Period Comparison" in body
+        assert "## Methodology" in body
+        assert "## Appendix" in body
 
     def test_bad_format_returns_exit_2(
         self,
