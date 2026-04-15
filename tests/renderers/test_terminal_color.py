@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+
 from codevigil.renderers.terminal import TerminalRenderer
 from tests.renderers._fixtures import make_meta, make_snapshots
 
