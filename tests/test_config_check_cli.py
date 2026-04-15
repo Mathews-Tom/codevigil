@@ -31,7 +31,8 @@ def test_config_check_prints_defaults(
     assert "watch.poll_interval = 60.0  (default)" in out
     assert "watch.root = '~/.claude/projects'  (default)" in out
     enabled_line = (
-        "collectors.enabled = ['read_edit_ratio', 'stop_phrase', 'reasoning_loop']  (default)"
+        "collectors.enabled = ['read_edit_ratio', 'stop_phrase', 'reasoning_loop', "
+        "'thinking', 'prompts']  (default)"
     )
     assert enabled_line in out
     assert "report.output_format = 'json'  (default)" in out

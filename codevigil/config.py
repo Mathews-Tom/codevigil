@@ -54,7 +54,7 @@ CONFIG_DEFAULTS: dict[str, Any] = {
         "display_project_limit": 10,
     },
     "collectors": {
-        "enabled": ["read_edit_ratio", "stop_phrase", "reasoning_loop"],
+        "enabled": ["read_edit_ratio", "stop_phrase", "reasoning_loop", "thinking", "prompts"],
         "parse_health": {
             # parse_health is a built-in always-on integrity collector.
             # The validator refuses any layer that flips this flag to
@@ -86,6 +86,12 @@ CONFIG_DEFAULTS: dict[str, Any] = {
             "warn_threshold": 10.0,
             "critical_threshold": 20.0,
             "min_tool_calls_for_severity": 20,
+            "experimental": True,
+        },
+        "thinking": {
+            "experimental": True,
+        },
+        "prompts": {
             "experimental": True,
         },
     },
@@ -133,7 +139,14 @@ CONFIG_DEFAULTS: dict[str, Any] = {
 # replace this with a registry-backed lookup, but the validator always needs
 # *some* source of truth so typos in the enabled list abort at load time.
 _KNOWN_COLLECTORS: frozenset[str] = frozenset(
-    {"parse_health", "read_edit_ratio", "stop_phrase", "reasoning_loop"}
+    {
+        "parse_health",
+        "read_edit_ratio",
+        "stop_phrase",
+        "reasoning_loop",
+        "thinking",
+        "prompts",
+    }
 )
 _KNOWN_RENDERERS: frozenset[str] = frozenset({"terminal", "json_file"})
 
