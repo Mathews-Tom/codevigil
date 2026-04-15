@@ -14,7 +14,7 @@ def _write_config(path: Path, body: str) -> Path:
 
 def test_defaults_only_when_no_other_layer(tmp_path: Path) -> None:
     resolved = load_config(config_path=None, env={}, cli_overrides={})
-    assert resolved.values["watch"]["poll_interval"] == 2.0
+    assert resolved.values["watch"]["poll_interval"] == 60.0
     assert resolved.sources["watch.poll_interval"] == "default"
 
 
