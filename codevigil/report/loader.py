@@ -26,7 +26,7 @@ No network calls. No disk writes. Offline, deterministic.
 from __future__ import annotations
 
 import logging
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -49,6 +49,7 @@ def load_reports_from_jsonl(
     cfg: dict[str, Any] | None = None,
     from_timestamp: datetime | None = None,
     to_timestamp: datetime | None = None,
+    on_path_loaded: Callable[[Path, int, int], None] | None = None,
 ) -> list[SessionReport]:
     """Load a :class:`~codevigil.analysis.store.SessionReport` from each path.
 
@@ -75,7 +76,8 @@ def load_reports_from_jsonl(
     """
     effective_cfg: dict[str, Any] = cfg if cfg is not None else CONFIG_DEFAULTS
     reports: list[SessionReport] = []
-    for path in paths:
+    total_paths = len(paths)
+    for index, path in enumerate(paths, start=1):
         try:
             report = _load_one(
                 path,
@@ -85,9 +87,13 @@ def load_reports_from_jsonl(
             )
         except Exception as exc:
             _LOG.warning("skipping %s: %s", path, exc)
+            if on_path_loaded is not None:
+                on_path_loaded(path, index, total_paths)
             continue
         if report is not None:
             reports.append(report)
+        if on_path_loaded is not None:
+            on_path_loaded(path, index, total_paths)
     reports.sort(key=lambda r: r.started_at)
     return reports
 
@@ -130,6 +136,10 @@ def _load_one(
     snapshots = _collect_snapshots(collector_instances)
     metrics: dict[str, float] = {name: snap.value for name, snap in snapshots.items()}
     _inject_write_precision(metrics, snapshots)
+    _inject_blind_edit_rate(metrics, snapshots)
+    _inject_research_mutation_ratio(metrics, snapshots)
+    _inject_thinking_detail(metrics, snapshots)
+    _inject_user_turns(metrics, snapshots)
 
     started: datetime = first_ts if first_ts is not None else datetime.now(UTC)
     ended: datetime = last_ts if last_ts is not None else started
@@ -275,6 +285,105 @@ def _inject_write_precision(
         metrics["write_precision"] = wp
 
 
+def _inject_blind_edit_rate(
+    metrics: dict[str, float],
+    snapshots: dict[str, MetricSnapshot],
+) -> None:
+    """Extract blind_edit_rate.value from read_edit_ratio detail.
+
+    Mirrors the issue #42796 §A "edits without a prior read" metric.
+    Skipped when tracking_confidence is below the configured floor —
+    the underlying collector already labels that detail as
+    "insufficient data" so we refuse to surface it as a headline number.
+    """
+    snap = snapshots.get("read_edit_ratio")
+    if snap is None or not isinstance(snap.detail, dict):
+        return
+    blind = snap.detail.get("blind_edit_rate")
+    if not isinstance(blind, dict):
+        return
+    if blind.get("label") == "insufficient data":
+        return
+    value = blind.get("value")
+    if isinstance(value, (int, float)):
+        metrics["blind_edit_rate"] = float(value)
+
+
+def _inject_research_mutation_ratio(
+    metrics: dict[str, float],
+    snapshots: dict[str, MetricSnapshot],
+) -> None:
+    """Surface the read_edit_ratio collector's research_mutation_ratio.
+
+    Pulled directly from the collector's detail dict; no recomputation.
+    Skipped when no mutations have been observed (the value is then a
+    degenerate (reads+research)/1 that is not meaningful as a cohort row).
+    """
+    snap = snapshots.get("read_edit_ratio")
+    if snap is None or not isinstance(snap.detail, dict):
+        return
+    if snap.detail.get("mutations", 0) == 0:
+        return
+    rmr = snap.detail.get("research_mutation_ratio")
+    if isinstance(rmr, (int, float)):
+        metrics["research_mutation_ratio"] = float(rmr)
+
+
+def _inject_user_turns(
+    metrics: dict[str, float],
+    snapshots: dict[str, MetricSnapshot],
+) -> None:
+    """Rename the prompts collector scalar to ``user_turns``.
+
+    The collector exposes a per-session count; the cohort reducer
+    averages it across sessions in the cohort cell. We rename to
+    ``user_turns`` so the column header in the cohort table is
+    self-explanatory.
+    """
+    snap = snapshots.get("prompts")
+    if snap is None:
+        return
+    metrics.pop("prompts", None)
+    if snap.value > 0:
+        metrics["user_turns"] = float(snap.value)
+
+
+def _inject_thinking_detail(
+    metrics: dict[str, float],
+    snapshots: dict[str, MetricSnapshot],
+) -> None:
+    """Extract thinking depth proxies from the thinking collector.
+
+    Surfaces three additional cohort metrics when thinking blocks were
+    observed:
+
+    * ``thinking_visible_ratio`` — primary scalar (visible / total).
+    * ``thinking_visible_chars_median`` — median visible block length.
+    * ``thinking_signature_chars_median`` — median signature length.
+
+    The bare ``thinking`` metric is renamed at injection time to
+    ``thinking_visible_ratio`` so the cohort table column header is
+    self-explanatory rather than a bare collector name.
+    """
+    snap = snapshots.get("thinking")
+    if snap is None or not isinstance(snap.detail, dict):
+        return
+    if snap.detail.get("thinking_blocks", 0) == 0:
+        # No thinking blocks observed; drop the auto-injected scalar so
+        # the cohort table does not show 0.0 on sessions where the
+        # signal is genuinely absent.
+        metrics.pop("thinking", None)
+        return
+    metrics.pop("thinking", None)
+    metrics["thinking_visible_ratio"] = float(snap.value)
+    visible_median = snap.detail.get("visible_chars_median")
+    if isinstance(visible_median, (int, float)):
+        metrics["thinking_visible_chars_median"] = float(visible_median)
+    sig_median = snap.detail.get("signature_chars_median")
+    if isinstance(sig_median, (int, float)):
+        metrics["thinking_signature_chars_median"] = float(sig_median)
+
+
 # ---------------------------------------------------------------------------
 # Path helpers
 # ---------------------------------------------------------------------------
@@ -315,6 +424,7 @@ def load_reports_for_windows(
     windows: list[tuple[str, datetime, datetime]],
     *,
     cfg: dict[str, Any] | None = None,
+    on_path_loaded: Callable[[str, Path, int, int], None] | None = None,
 ) -> dict[str, list[SessionReport]]:
     """Load session reports for a list of named time windows.
 
@@ -340,11 +450,18 @@ def load_reports_for_windows(
     """
     result: dict[str, list[SessionReport]] = {}
     for label, from_ts, to_ts in windows:
+        callback: Callable[[Path, int, int], None] | None = None
+        if on_path_loaded is not None:
+
+            def callback(path: Path, index: int, total: int, *, _label: str = label) -> None:
+                on_path_loaded(_label, path, index, total)
+
         result[label] = load_reports_from_jsonl(
             paths,
             cfg=cfg,
             from_timestamp=from_ts,
             to_timestamp=to_ts,
+            on_path_loaded=callback,
         )
     return result
 
