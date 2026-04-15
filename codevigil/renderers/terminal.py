@@ -115,6 +115,7 @@ def _metric_display_name(raw: str) -> str:
 _MIN_PREFIX: int = 8
 # Store refresh interval: re-read baseline percentiles every 60 ticks.
 _STORE_REFRESH_TICKS: int = 60
+_WATCH_SPINNER_FRAMES: tuple[str, ...] = ("|", "/", "-", "\\")
 
 # ---------------------------------------------------------------------------
 # Session block
@@ -192,6 +193,16 @@ class _SessionBlock:
     snapshots: list[MetricSnapshot] = field(default_factory=list)
 
 
+@dataclass(slots=True)
+class WatchStatus:
+    phase: str = "idle"
+    refresh_interval: float = 60.0
+    next_refresh_at: datetime | None = None
+    last_refresh_at: datetime | None = None
+    last_error_at: datetime | None = None
+    spinner_step: int = 0
+
+
 # ---------------------------------------------------------------------------
 # Renderer
 # ---------------------------------------------------------------------------
@@ -242,6 +253,8 @@ class TerminalRenderer:
         self._fleet_ok: int = 0
         self._fleet_projects: int = 0
         self._fleet_updated: datetime | None = None
+        self._watch_status: WatchStatus | None = None
+        self._last_body_renderables: list[Any] = []
         # Alternate-screen buffer state. When watching in an interactive
         # TTY the renderer switches to the terminal's alt screen so the
         # full-redraw clears do not clobber the user's shell scrollback;
@@ -319,43 +332,19 @@ class TerminalRenderer:
             self._stream.write("\x1b[2J\x1b[H")
             self._stream.flush()
 
-        renderables: list[Any] = [self._header_text()]
-
-        if self._display_mode == "project":
-            project_renderables, total_projects, shown_projects = self._build_project_rows()
-            renderables.extend(project_renderables)
-            if total_projects == 0 and total_active == 0:
-                renderables.append(self._no_active_sessions_text())
-            if total_projects > shown_projects:
-                renderables.append(
-                    self._truncation_text(
-                        shown=shown_projects,
-                        total=total_projects,
-                        noun="active projects",
-                        hint=(
-                            "Increase watch.display_project_limit to see more,"
-                            " or pass --by-session for per-session rows."
-                        ),
-                    )
-                )
-        else:
-            for session_id in sorted_ids:
-                renderables.extend(self._block_renderables(self._blocks[session_id]))
-
-            if total_active == 0:
-                renderables.append(self._no_active_sessions_text())
-
-            if total_active > shown:
-                renderables.append(
-                    self._truncation_text(
-                        shown=shown,
-                        total=total_active,
-                        noun="active sessions",
-                        hint="Increase watch.display_limit to see more.",
-                    )
-                )
-
-        self._console.print(rich.console.Group(*renderables))
+        body_renderables = self._build_body_renderables(
+            sorted_ids=sorted_ids,
+            total_active=total_active,
+            shown=shown,
+        )
+        self._last_body_renderables = list(body_renderables)
+        self._console.print(
+            rich.console.Group(
+                self._header_text(),
+                *body_renderables,
+                *self._watch_status_renderables(),
+            )
+        )
         self._blocks = {}
         self._order = []
 
@@ -424,6 +413,23 @@ class TerminalRenderer:
                 self._alt_screen_entered = False
             self._stream.flush()
 
+    def set_watch_status(self, status: WatchStatus | None) -> None:
+        self._watch_status = status
+
+    def refresh_status(self) -> None:
+        if not self._stream_is_tty() or not self._last_body_renderables:
+            return
+        self._fleet_updated = self._clock()
+        if self._use_color and self._stream_is_tty() and not self._alt_screen_entered:
+            self._stream.write("\x1b[?1049h")
+            self._alt_screen_entered = True
+        status_text = self._watch_status_text() if self._watch_status is not None else None
+        if status_text is None:
+            return
+        self._stream.write("\x1b[1A\r\x1b[2K")
+        self._console.print(status_text)
+        self._stream.flush()
+
     # --------------------------------------------------------------- helpers
 
     def _update_fleet_counters(self) -> None:
@@ -446,6 +452,48 @@ class TerminalRenderer:
         self._fleet_warn = warn
         self._fleet_ok = ok
         self._fleet_projects = len(projects)
+
+    def _build_body_renderables(
+        self,
+        *,
+        sorted_ids: list[str],
+        total_active: int,
+        shown: int,
+    ) -> list[Any]:
+        renderables: list[Any] = []
+        if self._display_mode == "project":
+            project_renderables, total_projects, shown_projects = self._build_project_rows()
+            renderables.extend(project_renderables)
+            if total_projects == 0 and total_active == 0:
+                renderables.append(self._no_active_sessions_text())
+            if total_projects > shown_projects:
+                renderables.append(
+                    self._truncation_text(
+                        shown=shown_projects,
+                        total=total_projects,
+                        noun="active projects",
+                        hint=(
+                            "Increase watch.display_project_limit to see more,"
+                            " or pass --by-session for per-session rows."
+                        ),
+                    )
+                )
+            return renderables
+
+        for session_id in sorted_ids:
+            renderables.extend(self._block_renderables(self._blocks[session_id]))
+        if total_active == 0:
+            renderables.append(self._no_active_sessions_text())
+        if total_active > shown:
+            renderables.append(
+                self._truncation_text(
+                    shown=shown,
+                    total=total_active,
+                    noun="active sessions",
+                    hint="Increase watch.display_limit to see more.",
+                )
+            )
+        return renderables
 
     def _build_project_rows(self) -> tuple[list[Any], int, int]:
         """Aggregate buffered session blocks by project and render one row
@@ -624,6 +672,39 @@ class TerminalRenderer:
             f"\u2026 showing {shown} of {total} {noun}. {hint}",
             style=_DIM_STYLE,
         )
+
+    def _watch_status_renderables(self) -> list[Any]:
+        if self._watch_status is None:
+            return []
+        return [self._watch_status_text()]
+
+    def _watch_status_text(self) -> rich.text.Text:
+        status = self._watch_status
+        assert status is not None
+        frame = _WATCH_SPINNER_FRAMES[status.spinner_step % len(_WATCH_SPINNER_FRAMES)]
+        now = self._clock()
+        parts: list[str] = [frame]
+        if status.phase == "error":
+            parts.append("retrying on next cadence")
+            if status.last_error_at is not None:
+                age = max(0.0, (now - status.last_error_at).total_seconds())
+                parts.append(f"last refresh failed {age:.0f}s ago")
+            parts.append(f"cadence {status.refresh_interval:.0f}s")
+        elif status.phase in {"scanning", "aggregating", "rendering", "refreshing"}:
+            parts.append(f"refreshing now • phase: {status.phase}")
+            parts.append(f"cadence {status.refresh_interval:.0f}s")
+        else:
+            parts.append(f"refresh every {status.refresh_interval:.0f}s")
+            if status.next_refresh_at is not None:
+                countdown = max(0.0, (status.next_refresh_at - now).total_seconds())
+                parts.append(f"next refresh in {countdown:.0f}s")
+            if status.last_error_at is not None:
+                age = max(0.0, (now - status.last_error_at).total_seconds())
+                parts.append(f"last refresh failed {age:.0f}s ago")
+            elif status.last_refresh_at is not None:
+                age = max(0.0, (now - status.last_refresh_at).total_seconds())
+                parts.append(f"last refresh {age:.0f}s ago")
+        return rich.text.Text(" • ".join(parts), style=_DIM_STYLE)
 
     def _stream_is_tty(self) -> bool:
         isatty = getattr(self._stream, "isatty", None)
