@@ -167,6 +167,22 @@ class ReasoningLoopCollector:
         self._max_burst = 0
         self._current_burst = 0
 
+    def serialize_state(self) -> dict[str, Any]:
+        """Return a JSON-serialisable snapshot of collector state."""
+
+        return {
+            "tool_calls": self._tool_calls,
+            "matches": self._matches,
+            "max_burst": self._max_burst,
+            "current_burst": self._current_burst,
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        self._tool_calls = int(state.get("tool_calls", 0))
+        self._matches = int(state.get("matches", 0))
+        self._max_burst = int(state.get("max_burst", 0))
+        self._current_burst = int(state.get("current_burst", 0))
+
 
 def _default_config() -> dict[str, Any]:
     return dict(CONFIG_DEFAULTS["collectors"]["reasoning_loop"])

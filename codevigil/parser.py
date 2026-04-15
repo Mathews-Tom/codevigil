@@ -31,6 +31,7 @@ EventKind. The schema is frozen after this PR — additive changes only.
 
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 from collections import deque
@@ -185,6 +186,22 @@ _FINGERPRINT_RESAMPLE_STRIDE: int = 500
 # ``_WINDOW_SIZE`` (50), so the rolling confidence stabilises quickly
 # but still reflects late-session drift that session-wide ratios hide.
 _ROLLING_CONFIDENCE_WINDOW: int = 200
+
+# Top-level ``type`` values emitted by Claude Code that carry no
+# conversational payload the collectors consume. They are skipped by
+# :meth:`SessionParser._dispatch` without a ``parser.unknown_type``
+# warning and without penalising ``parse_confidence``. Order does not
+# matter; this is a membership test.
+_STRUCTURAL_KINDS: frozenset[str] = frozenset(
+    {
+        "progress",
+        "attachment",
+        "file-history-snapshot",
+        "permission-mode",
+        "last-prompt",
+        "queue-operation",
+    }
+)
 
 
 @dataclass
@@ -438,16 +455,34 @@ class SessionParser:
     # ------------------------------------------------------------------
 
     def _dispatch(self, parsed: dict[str, Any], kind_field: str) -> Iterator[Event]:
-        timestamp = self._extract_timestamp(parsed)
+        timestamp, resolved = self._extract_timestamp(parsed)
         session_id = self._extract_session_id(parsed)
 
+        raw_events: Iterator[Event]
         if kind_field == "assistant":
-            yield from self._emit_assistant(parsed, timestamp, session_id)
+            raw_events = self._emit_assistant(parsed, timestamp, session_id)
         elif kind_field == "user":
-            yield from self._emit_user(parsed, timestamp, session_id)
+            raw_events = self._emit_user(parsed, timestamp, session_id)
         elif kind_field == "system":
-            yield from self._emit_system(parsed, timestamp, session_id)
+            raw_events = self._emit_system(parsed, timestamp, session_id)
+        elif kind_field in _STRUCTURAL_KINDS:
+            # Metadata records emitted by Claude Code alongside turn
+            # records: ``progress`` heartbeats, ``file-history-snapshot``
+            # markers, ``permission-mode`` transitions, ``attachment``
+            # pointers, ``queue-operation`` events, ``last-prompt``
+            # markers. These are not user/assistant turns and the
+            # collectors do not consume them, so we drop them without
+            # surfacing a ``parser.unknown_type`` warning. Crucially,
+            # we mark the line as "parsed" via an empty synthetic event
+            # stream so ``parse_confidence`` is not penalised — without
+            # this, a session that is mostly ``progress`` records (the
+            # dominant kind in modern Claude Code logs) trips the
+            # parse_health CRITICAL threshold even though every record
+            # was structurally valid JSON that the parser chose to skip.
+            self._stats.parsed_events += 1
+            return
         else:
+            raw_events = iter(())
             record(
                 CodevigilError(
                     level=ErrorLevel.WARN,
@@ -462,17 +497,29 @@ class SessionParser:
             )
             self._stats.record_missing("type")
 
-    def _extract_timestamp(self, parsed: dict[str, Any]) -> datetime:
-        # Check both "timestamp" (modern) and "ts" (pre-v1 historical shape).
+        if resolved:
+            yield from raw_events
+            return
+        for event in raw_events:
+            yield dataclasses.replace(event, timestamp_resolved=False)
+
+    def _extract_timestamp(self, parsed: dict[str, Any]) -> tuple[datetime, bool]:
+        """Return the event timestamp and a ``resolved`` flag.
+
+        ``resolved`` is ``True`` only when the source line carried a
+        real, parseable ISO-8601 timestamp. When ``False`` the returned
+        value is a wall-clock fallback and the aggregator must not use
+        it to advance the lifecycle monotonic cursor.
+        """
         raw = parsed.get("timestamp") or parsed.get("ts")
         if isinstance(raw, str) and raw:
             try:
-                return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+                return datetime.fromisoformat(raw.replace("Z", "+00:00")), True
             except ValueError:
                 self._stats.record_missing("timestamp")
         elif raw is None:
             self._stats.record_missing("timestamp")
-        return datetime.now(tz=UTC)
+        return datetime.now(tz=UTC), False
 
     def _extract_session_id(self, parsed: dict[str, Any]) -> str:
         # Check both "session_id" (modern) and "session" (pre-v1 historical shape).

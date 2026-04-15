@@ -40,6 +40,13 @@ class Event:
     and older session files that predate the ID field. The parser uses it for
     deduplication; collectors and renderers may read it but must never filter
     on it unconditionally (``None`` events are always valid).
+
+    ``timestamp_resolved`` is ``True`` when the parser found a real, parseable
+    timestamp on the source JSONL line. When it is ``False``, ``timestamp``
+    is a synthesised wall-clock fallback (``datetime.now(UTC)`` at parse
+    time) that must not be used to advance the aggregator's lifecycle
+    monotonic cursor — doing so would rewrite cold-replayed sessions as
+    ACTIVE when their actual last event is days old.
     """
 
     timestamp: datetime
@@ -47,6 +54,7 @@ class Event:
     kind: EventKind
     payload: dict[str, Any]
     message_id: str | None = None
+    timestamp_resolved: bool = True
 
 
 class Severity(Enum):
