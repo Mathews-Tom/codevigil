@@ -30,6 +30,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, TextIO
 
+import rich.box
 import rich.console
 import rich.rule
 import rich.table
@@ -70,6 +71,15 @@ _SEVERITY_RANK: dict[Severity, int] = {
     Severity.OK: 2,
 }
 
+# String-keyed rank lookup used when ranks must be rebuilt from the
+# processed-store severity column (which is a lowercase string, not a
+# ``Severity`` enum).
+_SEVERITY_RANK_BY_STRING: dict[str, int] = {
+    Severity.CRITICAL.value: _SEVERITY_RANK[Severity.CRITICAL],
+    Severity.WARN.value: _SEVERITY_RANK[Severity.WARN],
+    Severity.OK.value: _SEVERITY_RANK[Severity.OK],
+}
+
 _STATE_WORD: dict[SessionState, str] = {
     SessionState.ACTIVE: "ACTIVE",
     SessionState.STALE: "STALE",
@@ -84,6 +94,24 @@ _STATE_STYLE: dict[SessionState, str] = {
 
 _PARSE_HEALTH_METRIC: str = "parse_health"
 
+# Human-readable column headers for the project-row view. Keys are the
+# internal metric names emitted by each collector; values are the
+# spaced, capitalised labels shown in the TUI. Unknown metric names
+# fall through to a title-cased + underscore-replaced default.
+_METRIC_DISPLAY_NAMES: dict[str, str] = {
+    "parse_health": "Parse Health",
+    "read_edit_ratio": "Read/Edit",
+    "reasoning_loop": "Reasoning Loop",
+    "stop_phrase": "Stop Phrases",
+}
+
+
+def _metric_display_name(raw: str) -> str:
+    if raw in _METRIC_DISPLAY_NAMES:
+        return _METRIC_DISPLAY_NAMES[raw]
+    return raw.replace("_", " ").title()
+
+
 _MIN_PREFIX: int = 8
 # Store refresh interval: re-read baseline percentiles every 60 ticks.
 _STORE_REFRESH_TICKS: int = 60
@@ -91,6 +119,54 @@ _STORE_REFRESH_TICKS: int = 60
 # ---------------------------------------------------------------------------
 # Session block
 # ---------------------------------------------------------------------------
+
+
+@dataclass(slots=True)
+class _MetricRollup:
+    """One project-row metric cell after roll-up across sessions."""
+
+    value: float
+    severity_rank: int
+
+
+@dataclass
+class _ProjectAggregate:
+    """Buffered project-row state accumulated across session blocks."""
+
+    project_key: str
+    sessions: int = 0
+    severity_rank: int = _SEVERITY_RANK[Severity.OK]
+    updated_at_ts: float = 0.0
+    updated_dt: datetime | None = None
+    metrics: dict[str, _MetricRollup] = field(default_factory=dict)
+
+
+def _severity_label(rank: int) -> str:
+    if rank == _SEVERITY_RANK[Severity.CRITICAL]:
+        return _SEVERITY_WORD[Severity.CRITICAL]
+    if rank == _SEVERITY_RANK[Severity.WARN]:
+        return _SEVERITY_WORD[Severity.WARN]
+    return _SEVERITY_WORD[Severity.OK]
+
+
+def _severity_style_for_rank(rank: int) -> str:
+    if rank == _SEVERITY_RANK[Severity.CRITICAL]:
+        return _CRITICAL_STYLE
+    if rank == _SEVERITY_RANK[Severity.WARN]:
+        return _WARN_STYLE
+    return _OK_STYLE
+
+
+def _format_short_duration(seconds: float) -> str:
+    if seconds < 0:
+        seconds = 0
+    if seconds < 60:
+        return f"{seconds:.0f}s ago"
+    if seconds < 3600:
+        return f"{seconds / 60:.0f}m ago"
+    if seconds < 86400:
+        return f"{seconds / 3600:.0f}h ago"
+    return f"{seconds / 86400:.0f}d ago"
 
 
 @dataclass
@@ -110,6 +186,10 @@ class _SessionBlock:
     session_id: str = ""
     updated_dt: datetime | None = None
     project_key: str = ""
+    # Raw snapshots retained so the project-row view can roll up
+    # per-metric values across multiple sessions in the same project
+    # without re-parsing the metric tables.
+    snapshots: list[MetricSnapshot] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -130,12 +210,18 @@ class TerminalRenderer:
         use_color: bool = True,
         baseline_store: SessionStore | None = None,
         display_limit: int = 20,
+        display_mode: str = "session",
+        display_project_limit: int = 10,
+        store_project_reader: Callable[[int], list[Any]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(tz=UTC),
     ) -> None:
         self._stream: TextIO = stream if stream is not None else sys.stdout
         self._use_color = use_color
         self._show_experimental_badge = show_experimental_badge
         self._display_limit: int = display_limit
+        self._display_mode: str = display_mode
+        self._display_project_limit: int = max(1, int(display_project_limit))
+        self._store_project_reader: Callable[[int], list[Any]] | None = store_project_reader
         self._clock: Callable[[], datetime] = clock
         self._console = self._make_console()
 
@@ -156,14 +242,27 @@ class TerminalRenderer:
         self._fleet_ok: int = 0
         self._fleet_projects: int = 0
         self._fleet_updated: datetime | None = None
+        # Alternate-screen buffer state. When watching in an interactive
+        # TTY the renderer switches to the terminal's alt screen so the
+        # full-redraw clears do not clobber the user's shell scrollback;
+        # on ``close`` the alt screen is exited and the original shell
+        # content (including the command that launched ``codevigil
+        # watch``) is restored intact.
+        self._alt_screen_entered: bool = False
 
     def _make_console(self) -> rich.console.Console:
         # force_terminal mirrors use_color so the color-mode test emits ANSI
-        # even when the stream is a StringIO.
+        # even when the stream is a StringIO. Tests feed StringIO streams
+        # that report zero width; pin ``width`` wide enough so the project
+        # table (~140 cols with all columns) renders without soft-wrap.
+        width: int | None = None
+        if not self._stream_is_tty():
+            width = 200
         return rich.console.Console(
             file=self._stream,
             force_terminal=self._use_color,
             highlight=False,
+            width=width,
         )
 
     # ---------------------------------------------------------- tick lifecycle
@@ -210,21 +309,59 @@ class TerminalRenderer:
         self._console = self._make_console()
 
         if self._use_color and self._stream_is_tty():
+            # Enter the alternate screen once, on the first live frame.
+            # DECSET 1049 preserves the shell's main-screen content and
+            # cursor position so the caller's terminal returns exactly as
+            # it was when ``close()`` emits the matching reset.
+            if not self._alt_screen_entered:
+                self._stream.write("\x1b[?1049h")
+                self._alt_screen_entered = True
             self._stream.write("\x1b[2J\x1b[H")
             self._stream.flush()
 
         renderables: list[Any] = [self._header_text()]
-        for session_id in sorted_ids:
-            renderables.extend(self._block_renderables(self._blocks[session_id]))
 
-        if total_active > shown:
-            renderables.append(
-                rich.text.Text(
-                    f"\u2026 showing {shown} of {total_active} active sessions."
-                    " Increase watch.display_limit to see more.",
-                    style=_DIM_STYLE,
+        if self._display_mode == "project":
+            project_renderables, total_projects, shown_projects = self._build_project_rows()
+            renderables.extend(project_renderables)
+            if total_projects == 0 and total_active == 0:
+                renderables.append(
+                    rich.text.Text(
+                        "no active sessions \u2014 watching for new events"
+                        " (sessions idle for 35+ minutes are evicted).",
+                        style=_DIM_STYLE,
+                    )
                 )
-            )
+            if total_projects > shown_projects:
+                renderables.append(
+                    rich.text.Text(
+                        f"\u2026 showing {shown_projects} of {total_projects}"
+                        " active projects. Increase watch.display_project_limit"
+                        " to see more, or pass --by-session for per-session rows.",
+                        style=_DIM_STYLE,
+                    )
+                )
+        else:
+            for session_id in sorted_ids:
+                renderables.extend(self._block_renderables(self._blocks[session_id]))
+
+            if total_active == 0:
+                renderables.append(
+                    rich.text.Text(
+                        "no active sessions \u2014 watching for new events"
+                        " (sessions idle for 35+ minutes are evicted).",
+                        style=_DIM_STYLE,
+                    )
+                )
+
+            if total_active > shown:
+                renderables.append(
+                    rich.text.Text(
+                        f"\u2026 showing {shown} of {total_active} active sessions."
+                        " Increase watch.display_limit to see more.",
+                        style=_DIM_STYLE,
+                    )
+                )
 
         self._console.print(rich.console.Group(*renderables))
         self._blocks = {}
@@ -255,6 +392,7 @@ class TerminalRenderer:
             meta.parse_confidence,
         )
 
+        block.snapshots = list(snapshots)
         block.session_header = self._session_header_text(meta)
         block.metric_table = self._build_metric_table(snapshots, meta)
 
@@ -286,6 +424,12 @@ class TerminalRenderer:
 
     def close(self) -> None:
         with contextlib.suppress(ValueError):
+            if self._alt_screen_entered:
+                # DECRST 1049: leave the alternate screen and restore the
+                # pre-watch shell content. Paired exactly with the DECSET
+                # emitted on the first end_tick().
+                self._stream.write("\x1b[?1049l")
+                self._alt_screen_entered = False
             self._stream.flush()
 
     # --------------------------------------------------------------- helpers
@@ -310,6 +454,148 @@ class TerminalRenderer:
         self._fleet_warn = warn
         self._fleet_ok = ok
         self._fleet_projects = len(projects)
+
+    def _build_project_rows(self) -> tuple[list[Any], int, int]:
+        """Aggregate buffered session blocks by project and render one row
+        per project as a single compact rich Table.
+
+        Live in-memory session blocks are aggregated first; when a
+        ``store_project_reader`` callable is configured, top-N recent
+        projects from the persistent memory (the processed-session
+        store) are then merged in as a retrospective overlay so users
+        see their top-N most recent projects even when every live
+        session was evicted by the cold-start lifecycle pass. Live
+        aggregates take precedence for overlapping project keys.
+
+        Returns ``(renderables, total_project_count, shown_project_count)``
+        so the caller can append a truncation footer when the number of
+        active projects exceeds ``display_project_limit``.
+        """
+
+        projects: dict[str, _ProjectAggregate] = {}
+        for block in self._blocks.values():
+            key = block.project_key or "(unknown)"
+            agg = projects.get(key)
+            if agg is None:
+                agg = _ProjectAggregate(project_key=key)
+                projects[key] = agg
+            agg.sessions += 1
+            agg.severity_rank = min(agg.severity_rank, block.severity_rank)
+            if block.updated_at_ts > agg.updated_at_ts:
+                agg.updated_at_ts = block.updated_at_ts
+                agg.updated_dt = block.updated_dt
+            for snap in block.snapshots:
+                slot = agg.metrics.get(snap.name)
+                if slot is None:
+                    agg.metrics[snap.name] = _MetricRollup(
+                        value=float(snap.value),
+                        severity_rank=_SEVERITY_RANK.get(
+                            snap.severity, _SEVERITY_RANK[Severity.OK]
+                        ),
+                    )
+                    continue
+                snap_rank = _SEVERITY_RANK.get(snap.severity, _SEVERITY_RANK[Severity.OK])
+                if snap_rank < slot.severity_rank:
+                    slot.severity_rank = snap_rank
+                    slot.value = float(snap.value)
+
+        # Overlay top-N projects from the persistent memory so the TUI
+        # has something meaningful to render even when the in-memory
+        # aggregator has no live sessions. Live aggregates win on key
+        # collision — a live session's real-time state is always more
+        # authoritative than a stale persisted snapshot.
+        if self._store_project_reader is not None:
+            try:
+                store_aggregates = self._store_project_reader(self._display_project_limit)
+            except (OSError, RuntimeError):
+                store_aggregates = []
+            for stored in store_aggregates:
+                key = str(getattr(stored, "project_key", "") or "(unknown)")
+                if key in projects:
+                    continue
+                agg = _ProjectAggregate(project_key=key)
+                agg.sessions = int(getattr(stored, "session_count", 0) or 0)
+                stored_dt = getattr(stored, "last_event_time", None)
+                if isinstance(stored_dt, datetime):
+                    agg.updated_at_ts = stored_dt.timestamp()
+                    agg.updated_dt = stored_dt
+                stored_metrics = getattr(stored, "metrics", []) or []
+                worst_rank = _SEVERITY_RANK[Severity.OK]
+                for metric in stored_metrics:
+                    name = str(getattr(metric, "metric_name", ""))
+                    if not name:
+                        continue
+                    value = float(getattr(metric, "value", 0.0) or 0.0)
+                    severity_str = str(getattr(metric, "severity", "ok"))
+                    severity_rank = _SEVERITY_RANK_BY_STRING.get(
+                        severity_str, _SEVERITY_RANK[Severity.OK]
+                    )
+                    agg.metrics[name] = _MetricRollup(value=value, severity_rank=severity_rank)
+                    worst_rank = min(worst_rank, severity_rank)
+                agg.severity_rank = worst_rank
+                projects[key] = agg
+
+        if not projects:
+            return ([], 0, 0)
+
+        ordered = sorted(
+            projects.values(),
+            key=lambda p: (p.severity_rank, -p.updated_at_ts, p.project_key),
+        )
+        total_projects = len(ordered)
+        shown = ordered[: self._display_project_limit]
+
+        metric_names: list[str] = []
+        seen: set[str] = set()
+        for agg in shown:
+            for name in agg.metrics:
+                if name not in seen:
+                    seen.add(name)
+                    metric_names.append(name)
+
+        table = rich.table.Table(
+            title="Active Projects",
+            title_style="bold cyan",
+            show_header=True,
+            header_style="bold white on grey19",
+            box=rich.box.ROUNDED,
+            border_style="grey37",
+            row_styles=["", "on grey11"],
+            expand=False,
+            pad_edge=False,
+            collapse_padding=False,
+        )
+        table.add_column("Project", style="bold", no_wrap=True, min_width=14)
+        table.add_column("Sessions", justify="right", no_wrap=True)
+        table.add_column("Status", justify="center", no_wrap=True, min_width=6)
+        for name in metric_names:
+            table.add_column(_metric_display_name(name), justify="right", no_wrap=True)
+        table.add_column("Last Active", justify="right", no_wrap=True)
+
+        now = self._clock()
+        for agg in shown:
+            state_word = _severity_label(agg.severity_rank)
+            state_style = _severity_style_for_rank(agg.severity_rank)
+            row: list[Any] = [
+                rich.text.Text(agg.project_key, style=f"bold {state_style}"),
+                rich.text.Text(str(agg.sessions), style="white"),
+                rich.text.Text(f"{state_word:^6}", style=f"bold {state_style}"),
+            ]
+            for name in metric_names:
+                rollup = agg.metrics.get(name)
+                if rollup is None:
+                    row.append(rich.text.Text("—", style=_DIM_STYLE))
+                else:
+                    metric_style = _severity_style_for_rank(rollup.severity_rank)
+                    row.append(rich.text.Text(f"{rollup.value:.2f}", style=metric_style))
+            if agg.updated_dt is not None:
+                delta = (now - agg.updated_dt).total_seconds()
+                row.append(rich.text.Text(_format_short_duration(delta), style=_DIM_STYLE))
+            else:
+                row.append(rich.text.Text("—", style=_DIM_STYLE))
+            table.add_row(*row)
+
+        return ([table], total_projects, len(shown))
 
     def _block_renderables(self, block: _SessionBlock) -> list[Any]:
         """Return the ordered list of Rich renderables for one session block."""

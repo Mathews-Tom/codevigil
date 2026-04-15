@@ -24,8 +24,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import logging
+import os
 import signal
 import sys
+import threading
 import time
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
@@ -82,6 +85,18 @@ def _add_report_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParse
         type=Path,
         default=None,
         help="Override the report output directory (must live under $HOME).",
+    )
+    p.add_argument(
+        "--output-file",
+        dest="output_file",
+        type=Path,
+        default=None,
+        help=(
+            "Write the rendered report to this exact file path instead of"
+            " the default directory/filename. Parent directories are created"
+            " if missing. Path must live under $HOME. Mutually exclusive"
+            " with --output."
+        ),
     )
     p.add_argument(
         "--group-by",
@@ -154,7 +169,41 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Resolve the effective config and print each value with its source.",
     )
 
-    sub.add_parser("watch", help="Live tick loop over ~/.claude/projects session files.")
+    watch_parser = sub.add_parser(
+        "watch", help="Live tick loop over ~/.claude/projects session files."
+    )
+    watch_parser.add_argument(
+        "--by-session",
+        dest="by_session",
+        action="store_true",
+        default=False,
+        help=(
+            "Render one block per session instead of the default project-row"
+            " roll-up. Equivalent to setting watch.display_mode='session' for"
+            " this invocation."
+        ),
+    )
+
+    ingest_parser = sub.add_parser(
+        "ingest",
+        help=(
+            "Cold-ingest every JSONL session under the watch root into the "
+            "local persistent memory (SQLite). Run once before codevigil "
+            "watch so live ticks only process newly-appended events."
+        ),
+    )
+    ingest_parser.add_argument(
+        "--db",
+        type=Path,
+        default=None,
+        help="Override the processed-session database path.",
+    )
+    ingest_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Re-ingest every session, ignoring existing DB entries.",
+    )
 
     _add_report_subparser(sub)
 
@@ -196,6 +245,8 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "watch":
         return _run_watch(args)
+    if args.command == "ingest":
+        return _run_ingest(args)
     if args.command == "report":
         return _run_report(args)
     if args.command == "export":
@@ -218,21 +269,102 @@ def _format_error(err: CodevigilError) -> str:
 
 
 _shutdown_requested: bool = False
+_shutdown_event: threading.Event = threading.Event()
 
 
 def _install_sigint_handler() -> None:
-    """Install a SIGINT handler that flips ``_shutdown_requested``.
+    """Install a SIGINT handler that signals instant shutdown.
 
-    The handler only sets a module-level flag; the watch loop polls the
-    flag after each tick and exits cleanly. Tests substitute their own
-    flag flip via ``monkeypatch``.
+    The handler flips the module-level ``_shutdown_requested`` flag for
+    backward compatibility with tests that poll it, and also sets
+    ``_shutdown_event`` so the watch loop's ``threading.Event.wait``
+    between ticks wakes up immediately on Ctrl+C instead of blocking
+    for the full ``tick_interval``. Tests substitute their own flag
+    flip via ``monkeypatch``.
     """
 
     def _handler(_signum: int, _frame: FrameType | None) -> None:
         global _shutdown_requested
         _shutdown_requested = True
+        _shutdown_event.set()
 
     signal.signal(signal.SIGINT, _handler)
+    signal.signal(signal.SIGTERM, _handler)
+
+
+def _run_ingest(args: argparse.Namespace) -> int:
+    """Cold-ingest every JSONL session into the processed-session store.
+
+    See :mod:`codevigil.ingest` for the design notes. This function is
+    the thin CLI glue: resolve config, validate the watch root, open
+    the store, delegate to :func:`codevigil.ingest.run_ingest`, print
+    the summary, and exit.
+    """
+
+    from rich.console import Console
+
+    from codevigil.analysis.processed_store import (
+        ProcessedSessionStore,
+        ProcessedStoreError,
+        default_db_path,
+    )
+    from codevigil.ingest import run_ingest
+    from codevigil.privacy import PrivacyViolationError
+
+    try:
+        resolved = load_config(config_path=args.config)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
+        return 2 if err.level is ErrorLevel.CRITICAL else 1
+
+    cfg = resolved.values
+    watch_cfg = cfg["watch"]
+    root = Path(str(watch_cfg["root"])).expanduser()
+
+    # Enforce the same home-scope privacy gate the watcher applies so a
+    # misconfigured watch.root cannot silently read outside $HOME.
+    try:
+        resolved_root = root.resolve()
+        if not resolved_root.is_relative_to(Path.home().resolve()):
+            raise PrivacyViolationError(
+                f"ingest root {resolved_root!s} is outside the user home directory"
+            )
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: ingest.path_scope_violation: {exc}\n")
+        return 2
+
+    db_override: Path | None = getattr(args, "db", None)
+    db_path = db_override.expanduser() if db_override is not None else default_db_path()
+
+    console = Console()
+    store = ProcessedSessionStore(db_path)
+    try:
+        store.open()
+    except ProcessedStoreError as exc:
+        exc.record()
+        sys.stderr.write(f"CRITICAL: {exc.code}: {exc.message}\n")
+        return 2
+
+    try:
+        result = run_ingest(
+            root=root,
+            store=store,
+            config=cfg,
+            console=console,
+            force=bool(getattr(args, "force", False)),
+        )
+    finally:
+        store.close()
+
+    console.print(
+        f"[green]ingest complete[/green] "
+        f"processed={result.sessions_processed} "
+        f"skipped={result.sessions_skipped} "
+        f"files={result.files_walked} "
+        f"bytes={result.bytes_read} "
+        f"db={result.db_path}"
+    )
+    return 0
 
 
 def _run_one_tick(
@@ -253,9 +385,185 @@ def _run_one_tick(
     renderer.end_tick()
 
 
+def _configure_timing_logger() -> None:
+    """Install a stderr handler for timing logs when ``CODEVIGIL_DEBUG_TIMING``
+    is set.
+
+    Off by default so normal ``watch`` invocations stay quiet. Setting
+    ``CODEVIGIL_DEBUG_TIMING=1`` (or any truthy value) routes the
+    ``codevigil.watcher`` and ``codevigil.aggregator`` loggers to stderr at
+    INFO level; ``CODEVIGIL_DEBUG_TIMING=debug`` enables per-tick DEBUG
+    output as well.
+    """
+
+    raw = os.environ.get("CODEVIGIL_DEBUG_TIMING", "").strip().lower()
+    if not raw or raw in {"0", "false", "no", "off"}:
+        return
+    level = logging.DEBUG if raw == "debug" else logging.INFO
+    handler = logging.StreamHandler(stream=sys.stderr)
+    handler.setFormatter(logging.Formatter("codevigil.timing %(name)s %(message)s"))
+    for name in ("codevigil.watcher", "codevigil.aggregator"):
+        logger = logging.getLogger(name)
+        logger.setLevel(level)
+        logger.addHandler(handler)
+        logger.propagate = False
+
+
+def _build_collector_state_provider(
+    db_path: Path,
+) -> Any:
+    """Return a ``session_id -> state_dict`` callable backed by the
+    processed-session store, or ``None`` when no DB exists.
+
+    The returned callable opens a short-lived connection per call to
+    keep the provider stateless from the aggregator's perspective. The
+    aggregator invokes it at most once per session creation, so the
+    per-call open/close overhead is negligible relative to the
+    collector restore it enables.
+    """
+
+    from codevigil.analysis.processed_store import (
+        ProcessedSessionStore,
+        ProcessedStoreError,
+    )
+
+    if not db_path.exists():
+        return None
+
+    def provider(session_id: str) -> dict[str, dict[str, Any]] | None:
+        store = ProcessedSessionStore(db_path)
+        try:
+            store.open()
+        except ProcessedStoreError:
+            return None
+        try:
+            record = store.get_session(session_id)
+        finally:
+            store.close()
+        if record is None:
+            return None
+        return {name: dict(slice_) for name, slice_ in record.collector_state.items()}
+
+    return provider
+
+
+def _build_store_project_reader(db_path: Path) -> Any:
+    """Return a callable that fetches top-N recent projects from the store.
+
+    The returned callable is invoked from the terminal renderer on
+    every tick to populate the project-row view. When the database is
+    missing or cannot be opened it returns an empty list; the renderer
+    gracefully degrades to the live-aggregator-only view in that case.
+    """
+
+    from codevigil.analysis.processed_store import (
+        ProcessedSessionStore,
+        ProcessedStoreError,
+        RecentProjectAggregate,
+    )
+
+    if not db_path.exists():
+        return None
+
+    def reader(limit: int) -> list[RecentProjectAggregate]:
+        store = ProcessedSessionStore(db_path)
+        try:
+            store.open()
+        except ProcessedStoreError:
+            return []
+        try:
+            return list(store.iter_recent_project_aggregates(limit))
+        finally:
+            store.close()
+
+    return reader
+
+
+def _load_cursor_seeds_from_store(db_path: Path) -> dict[Path, Any]:
+    """Load cursor seeds from the persistent processed-session store.
+
+    Returns a mapping of file path → ``CachedCursor`` suitable for
+    :class:`~codevigil.watcher.PollingSource`. Silently returns an
+    empty dict if the store cannot be opened so a corrupt store never
+    blocks ``codevigil watch`` from running — the user still gets a
+    cold cold-start in that case.
+    """
+
+    from codevigil.analysis.processed_store import (
+        ProcessedSessionStore,
+        ProcessedStoreError,
+    )
+    from codevigil.watcher_cache import CachedCursor
+
+    seeds: dict[Path, Any] = {}
+    if not db_path.exists():
+        return seeds
+    store = ProcessedSessionStore(db_path)
+    try:
+        store.open()
+    except ProcessedStoreError:
+        return seeds
+    try:
+        for record in store.iter_all():
+            seeds[record.path] = CachedCursor(
+                inode=record.inode,
+                size=record.size,
+                offset=record.offset,
+                pending=record.pending,
+                mtime=record.mtime,
+            )
+    finally:
+        store.close()
+    return seeds
+
+
+def _auto_ingest_if_missing(
+    *,
+    cfg: dict[str, Any],
+    db_path: Path,
+    console_err_writer: Any,
+) -> int:
+    """Auto-invoke cold ingest when the processed-session DB is missing.
+
+    Returns ``0`` on success (DB now present), non-zero on failure. When
+    the DB file already exists this is a no-op and returns ``0``.
+    """
+
+    from rich.console import Console
+
+    from codevigil.analysis.processed_store import (
+        ProcessedSessionStore,
+        ProcessedStoreError,
+    )
+    from codevigil.ingest import run_ingest
+
+    if db_path.exists():
+        return 0
+
+    console = Console()
+    console.print(
+        "[yellow]processed-session database missing at "
+        f"{db_path!s} — running [bold]codevigil ingest[/bold] first[/yellow]"
+    )
+    store = ProcessedSessionStore(db_path)
+    try:
+        store.open()
+    except ProcessedStoreError as exc:
+        exc.record()
+        console_err_writer(f"CRITICAL: {exc.code}: {exc.message}\n")
+        return 2
+    try:
+        root = Path(str(cfg["watch"]["root"])).expanduser()
+        run_ingest(root=root, store=store, config=cfg, console=console, force=False)
+    finally:
+        store.close()
+    return 0
+
+
 def _run_watch(args: argparse.Namespace) -> int:
     global _shutdown_requested
     _shutdown_requested = False
+    _configure_timing_logger()
     try:
         resolved = load_config(config_path=args.config)
     except ConfigError as err:
@@ -264,46 +572,77 @@ def _run_watch(args: argparse.Namespace) -> int:
 
     cfg = resolved.values
     watch_cfg = cfg["watch"]
+
+    # Phase C: auto-ingest if the local system memory is missing.
+    from codevigil.analysis.processed_store import default_db_path
+
+    db_path = default_db_path()
+    rc = _auto_ingest_if_missing(cfg=cfg, db_path=db_path, console_err_writer=sys.stderr.write)
+    if rc != 0:
+        return rc
+
+    # Phase C: seed the watcher's per-file cursors from the persistent
+    # processed-session store so unchanged files are skipped entirely
+    # and only newly-appended bytes on grown files are read.
+    seed_cursors = _load_cursor_seeds_from_store(db_path)
+
     try:
         source = PollingSource(
             Path(watch_cfg["root"]),
             interval=float(watch_cfg["poll_interval"]),
             max_files=int(watch_cfg["max_files"]),
             large_file_warn_bytes=int(watch_cfg["large_file_warn_bytes"]),
+            seed_cursors=seed_cursors,
         )
     except PrivacyViolationError as exc:
         sys.stderr.write(f"CRITICAL: watcher.path_scope_violation: {exc}\n")
         return 2
 
     bootstrap = _build_bootstrap_manager(cfg)
+    state_provider = _build_collector_state_provider(db_path)
     aggregator = SessionAggregator(
         source,
         config=cfg,
         project_registry=ProjectRegistry(),
         clock=time.monotonic,
         bootstrap=bootstrap,
+        collector_state_provider=state_provider,
     )
 
     storage_cfg = cfg.get("storage", {})
     baseline_store: SessionStore | None = (
         SessionStore() if bool(storage_cfg.get("enable_persistence", False)) else None
     )
+    display_mode = str(watch_cfg.get("display_mode", "project"))
+    if bool(getattr(args, "by_session", False)):
+        display_mode = "session"
+    store_project_reader = _build_store_project_reader(db_path)
     renderer = TerminalRenderer(
         show_experimental_badge=_any_experimental_enabled(cfg),
         baseline_store=baseline_store,
         display_limit=int(watch_cfg["display_limit"]),
+        display_mode=display_mode,
+        display_project_limit=int(watch_cfg.get("display_project_limit", 10)),
+        store_project_reader=store_project_reader,
     )
     explain = bool(args.explain)
     tick_interval = float(watch_cfg["tick_interval"])
+    _shutdown_event.clear()
     _install_sigint_handler()
 
     try:
         while True:
             _run_one_tick(aggregator, renderer, explain=explain)
-            if _shutdown_requested:
+            if _shutdown_requested or _shutdown_event.is_set():
                 break
-            time.sleep(tick_interval)
-            if _shutdown_requested:
+            # Interruptible sleep: ``Event.wait`` returns immediately when
+            # the SIGINT/SIGTERM handler calls ``_shutdown_event.set()``,
+            # so Ctrl+C never waits for the full tick interval (60 s by
+            # default) before the program exits. ``wait`` returns True on
+            # early wake-up and False on normal timeout; either way the
+            # flag check on the next line settles it.
+            _shutdown_event.wait(tick_interval)
+            if _shutdown_requested or _shutdown_event.is_set():
                 break
     finally:
         aggregator.close()
@@ -438,19 +777,35 @@ class _SessionReport:
 
 def _emit_single_period_report(
     session_reports: list[_SessionReport],
-    output_dir: Path,
+    output_dir: Path | None,
     *,
     fmt: str,
     explain: bool,
+    output_file: Path | None = None,
 ) -> None:
-    """Render and write a single-period report in json or markdown format."""
-    output_dir.mkdir(parents=True, exist_ok=True)
+    """Render and write a single-period report in json or markdown format.
+
+    When ``output_file`` is provided it takes precedence over
+    ``output_dir`` and the payload is written to the exact path (parent
+    directories are created as needed). Otherwise ``output_dir`` must be
+    set and the default filename (``report.json`` / ``report.md``) is
+    used.
+    """
     if fmt == "json":
         payload = _render_report_json(session_reports, explain=explain)
-        _write_report(output_dir / "report.json", payload)
+        default_name = "report.json"
     else:
         payload = _render_report_markdown(session_reports, explain=explain)
-        _write_report(output_dir / "report.md", payload)
+        default_name = "report.md"
+
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        _write_report(output_file, payload)
+    else:
+        assert output_dir is not None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_report(output_dir / default_name, payload)
+
     sys.stdout.write(payload)
     sys.stdout.flush()
 
@@ -470,6 +825,14 @@ def _run_report(args: argparse.Namespace) -> int:
         sys.stderr.write(
             "CRITICAL: cli.report.flag_conflict: "
             "--group-by and --compare-periods are mutually exclusive\n"
+        )
+        return 2
+
+    output_file_arg: Path | None = getattr(args, "output_file", None)
+    if output_file_arg is not None and args.output is not None:
+        sys.stderr.write(
+            "CRITICAL: cli.report.flag_conflict: "
+            "--output and --output-file are mutually exclusive\n"
         )
         return 2
 
@@ -494,8 +857,13 @@ def _run_report(args: argparse.Namespace) -> int:
         sys.stderr.write(f"CRITICAL: cli.report.bad_date: --to {args.to_date!r}\n")
         return 2
 
+    output_file: Path | None = None
+    output_dir: Path | None = None
     try:
-        output_dir = _resolve_report_output_dir(cfg, override=args.output)
+        if output_file_arg is not None:
+            output_file = _resolve_report_output_file(output_file_arg)
+        else:
+            output_dir = _resolve_report_output_dir(cfg, override=args.output)
     except PrivacyViolationError as exc:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
@@ -516,6 +884,7 @@ def _run_report(args: argparse.Namespace) -> int:
         output_dir,
         fmt=args.format,
         explain=bool(args.explain),
+        output_file=output_file,
     )
     return exit_code
 
@@ -644,8 +1013,14 @@ def _run_report_multi_period(
     from codevigil.report.loader import expand_to_jsonl_paths, load_reports_for_windows
     from codevigil.report.renderer import render_multi_period
 
+    output_file_arg: Path | None = getattr(args, "output_file", None)
+    output_file: Path | None = None
+    output_dir: Path | None = None
     try:
-        output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
+        if output_file_arg is not None:
+            output_file = _resolve_report_output_file(output_file_arg)
+        else:
+            output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
     except PrivacyViolationError as exc:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
@@ -662,18 +1037,23 @@ def _run_report_multi_period(
     paths = expand_to_jsonl_paths(args.path)
     period_reports = load_reports_for_windows(paths, windows, cfg=cfg)
 
-    output_dir.mkdir(parents=True, exist_ok=True)
     fmt: str = getattr(args, "format", "json")
-
     if fmt == "json":
         payload = _render_multi_period_json(period_reports)
-        _write_report(output_dir / "report_multi_period.json", payload)
-        sys.stdout.write(payload)
+        default_name = "report_multi_period.json"
     else:
         payload = render_multi_period(period_reports)
-        _write_report(output_dir / "report_multi_period.txt", payload)
-        sys.stdout.write(payload)
+        default_name = "report_multi_period.txt"
 
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        _write_report(output_file, payload)
+    else:
+        assert output_dir is not None
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _write_report(output_dir / default_name, payload)
+
+    sys.stdout.write(payload)
     sys.stdout.flush()
     return 0
 
@@ -757,6 +1137,24 @@ def _parse_date_filter(value: str | None, *, end_of_day: bool) -> datetime | Non
     if end_of_day and parsed.hour == 0 and parsed.minute == 0 and parsed.second == 0:
         return parsed.replace(hour=23, minute=59, second=59)
     return parsed
+
+
+def _resolve_report_output_file(override: Path) -> Path:
+    """Resolve an explicit ``--output-file`` path and enforce home-scope.
+
+    Parent directories are created by the caller. The resolved absolute
+    path must be a descendant of ``Path.home().resolve()`` or the command
+    aborts with ``PrivacyViolationError``.
+    """
+
+    resolved = override.expanduser().resolve()
+    home = Path.home().resolve()
+    if not resolved.is_relative_to(home):
+        raise PrivacyViolationError(
+            f"report output file {str(resolved)!r} is outside the user "
+            f"home directory {str(home)!r}; refusing to write"
+        )
+    return resolved
 
 
 def _resolve_report_output_dir(cfg: dict[str, Any], *, override: Path | None) -> Path:
