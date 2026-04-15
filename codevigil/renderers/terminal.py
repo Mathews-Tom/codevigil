@@ -325,20 +325,17 @@ class TerminalRenderer:
             project_renderables, total_projects, shown_projects = self._build_project_rows()
             renderables.extend(project_renderables)
             if total_projects == 0 and total_active == 0:
-                renderables.append(
-                    rich.text.Text(
-                        "no active sessions \u2014 watching for new events"
-                        " (sessions idle for 35+ minutes are evicted).",
-                        style=_DIM_STYLE,
-                    )
-                )
+                renderables.append(self._no_active_sessions_text())
             if total_projects > shown_projects:
                 renderables.append(
-                    rich.text.Text(
-                        f"\u2026 showing {shown_projects} of {total_projects}"
-                        " active projects. Increase watch.display_project_limit"
-                        " to see more, or pass --by-session for per-session rows.",
-                        style=_DIM_STYLE,
+                    self._truncation_text(
+                        shown=shown_projects,
+                        total=total_projects,
+                        noun="active projects",
+                        hint=(
+                            "Increase watch.display_project_limit to see more,"
+                            " or pass --by-session for per-session rows."
+                        ),
                     )
                 )
         else:
@@ -346,20 +343,15 @@ class TerminalRenderer:
                 renderables.extend(self._block_renderables(self._blocks[session_id]))
 
             if total_active == 0:
-                renderables.append(
-                    rich.text.Text(
-                        "no active sessions \u2014 watching for new events"
-                        " (sessions idle for 35+ minutes are evicted).",
-                        style=_DIM_STYLE,
-                    )
-                )
+                renderables.append(self._no_active_sessions_text())
 
             if total_active > shown:
                 renderables.append(
-                    rich.text.Text(
-                        f"\u2026 showing {shown} of {total_active} active sessions."
-                        " Increase watch.display_limit to see more.",
-                        style=_DIM_STYLE,
+                    self._truncation_text(
+                        shown=shown,
+                        total=total_active,
+                        noun="active sessions",
+                        hint="Increase watch.display_limit to see more.",
                     )
                 )
 
@@ -472,68 +464,8 @@ class TerminalRenderer:
         active projects exceeds ``display_project_limit``.
         """
 
-        projects: dict[str, _ProjectAggregate] = {}
-        for block in self._blocks.values():
-            key = block.project_key or "(unknown)"
-            agg = projects.get(key)
-            if agg is None:
-                agg = _ProjectAggregate(project_key=key)
-                projects[key] = agg
-            agg.sessions += 1
-            agg.severity_rank = min(agg.severity_rank, block.severity_rank)
-            if block.updated_at_ts > agg.updated_at_ts:
-                agg.updated_at_ts = block.updated_at_ts
-                agg.updated_dt = block.updated_dt
-            for snap in block.snapshots:
-                slot = agg.metrics.get(snap.name)
-                if slot is None:
-                    agg.metrics[snap.name] = _MetricRollup(
-                        value=float(snap.value),
-                        severity_rank=_SEVERITY_RANK.get(
-                            snap.severity, _SEVERITY_RANK[Severity.OK]
-                        ),
-                    )
-                    continue
-                snap_rank = _SEVERITY_RANK.get(snap.severity, _SEVERITY_RANK[Severity.OK])
-                if snap_rank < slot.severity_rank:
-                    slot.severity_rank = snap_rank
-                    slot.value = float(snap.value)
-
-        # Overlay top-N projects from the persistent memory so the TUI
-        # has something meaningful to render even when the in-memory
-        # aggregator has no live sessions. Live aggregates win on key
-        # collision — a live session's real-time state is always more
-        # authoritative than a stale persisted snapshot.
-        if self._store_project_reader is not None:
-            try:
-                store_aggregates = self._store_project_reader(self._display_project_limit)
-            except (OSError, RuntimeError):
-                store_aggregates = []
-            for stored in store_aggregates:
-                key = str(getattr(stored, "project_key", "") or "(unknown)")
-                if key in projects:
-                    continue
-                agg = _ProjectAggregate(project_key=key)
-                agg.sessions = int(getattr(stored, "session_count", 0) or 0)
-                stored_dt = getattr(stored, "last_event_time", None)
-                if isinstance(stored_dt, datetime):
-                    agg.updated_at_ts = stored_dt.timestamp()
-                    agg.updated_dt = stored_dt
-                stored_metrics = getattr(stored, "metrics", []) or []
-                worst_rank = _SEVERITY_RANK[Severity.OK]
-                for metric in stored_metrics:
-                    name = str(getattr(metric, "metric_name", ""))
-                    if not name:
-                        continue
-                    value = float(getattr(metric, "value", 0.0) or 0.0)
-                    severity_str = str(getattr(metric, "severity", "ok"))
-                    severity_rank = _SEVERITY_RANK_BY_STRING.get(
-                        severity_str, _SEVERITY_RANK[Severity.OK]
-                    )
-                    agg.metrics[name] = _MetricRollup(value=value, severity_rank=severity_rank)
-                    worst_rank = min(worst_rank, severity_rank)
-                agg.severity_rank = worst_rank
-                projects[key] = agg
+        projects = self._live_project_aggregates()
+        self._overlay_store_projects(projects)
 
         if not projects:
             return ([], 0, 0)
@@ -597,6 +529,77 @@ class TerminalRenderer:
 
         return ([table], total_projects, len(shown))
 
+    def _live_project_aggregates(self) -> dict[str, _ProjectAggregate]:
+        projects: dict[str, _ProjectAggregate] = {}
+        for block in self._blocks.values():
+            key = block.project_key or "(unknown)"
+            agg = projects.get(key)
+            if agg is None:
+                agg = _ProjectAggregate(project_key=key)
+                projects[key] = agg
+            agg.sessions += 1
+            agg.severity_rank = min(agg.severity_rank, block.severity_rank)
+            if block.updated_at_ts > agg.updated_at_ts:
+                agg.updated_at_ts = block.updated_at_ts
+                agg.updated_dt = block.updated_dt
+            self._merge_live_project_metrics(agg, block.snapshots)
+        return projects
+
+    def _merge_live_project_metrics(
+        self,
+        agg: _ProjectAggregate,
+        snapshots: list[MetricSnapshot],
+    ) -> None:
+        for snap in snapshots:
+            slot = agg.metrics.get(snap.name)
+            severity_rank = _SEVERITY_RANK.get(snap.severity, _SEVERITY_RANK[Severity.OK])
+            if slot is None:
+                agg.metrics[snap.name] = _MetricRollup(
+                    value=float(snap.value),
+                    severity_rank=severity_rank,
+                )
+                continue
+            if severity_rank < slot.severity_rank:
+                slot.severity_rank = severity_rank
+                slot.value = float(snap.value)
+
+    def _overlay_store_projects(self, projects: dict[str, _ProjectAggregate]) -> None:
+        if self._store_project_reader is None:
+            return
+        try:
+            store_aggregates = self._store_project_reader(self._display_project_limit)
+        except (OSError, RuntimeError):
+            return
+        for stored in store_aggregates:
+            key = str(getattr(stored, "project_key", "") or "(unknown)")
+            if key in projects:
+                continue
+            projects[key] = self._stored_project_aggregate(key, stored)
+
+    def _stored_project_aggregate(self, key: str, stored: Any) -> _ProjectAggregate:
+        agg = _ProjectAggregate(project_key=key)
+        agg.sessions = int(getattr(stored, "session_count", 0) or 0)
+        stored_dt = getattr(stored, "last_event_time", None)
+        if isinstance(stored_dt, datetime):
+            agg.updated_at_ts = stored_dt.timestamp()
+            agg.updated_dt = stored_dt
+        worst_rank = _SEVERITY_RANK[Severity.OK]
+        for metric in getattr(stored, "metrics", []) or []:
+            name = str(getattr(metric, "metric_name", ""))
+            if not name:
+                continue
+            severity_rank = _SEVERITY_RANK_BY_STRING.get(
+                str(getattr(metric, "severity", "ok")),
+                _SEVERITY_RANK[Severity.OK],
+            )
+            agg.metrics[name] = _MetricRollup(
+                value=float(getattr(metric, "value", 0.0) or 0.0),
+                severity_rank=severity_rank,
+            )
+            worst_rank = min(worst_rank, severity_rank)
+        agg.severity_rank = worst_rank
+        return agg
+
     def _block_renderables(self, block: _SessionBlock) -> list[Any]:
         """Return the ordered list of Rich renderables for one session block."""
         parts: list[Any] = list(block.banner_items)
@@ -608,6 +611,19 @@ class TerminalRenderer:
         parts.append(rich.rule.Rule(style="dim"))
         parts.extend(block.footer_items)
         return parts
+
+    def _no_active_sessions_text(self) -> rich.text.Text:
+        return rich.text.Text(
+            "no active sessions \u2014 watching for new events"
+            " (sessions idle for 35+ minutes are evicted).",
+            style=_DIM_STYLE,
+        )
+
+    def _truncation_text(self, *, shown: int, total: int, noun: str, hint: str) -> rich.text.Text:
+        return rich.text.Text(
+            f"\u2026 showing {shown} of {total} {noun}. {hint}",
+            style=_DIM_STYLE,
+        )
 
     def _stream_is_tty(self) -> bool:
         isatty = getattr(self._stream, "isatty", None)
