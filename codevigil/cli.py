@@ -47,8 +47,9 @@ from codevigil.errors import CodevigilError, ErrorLevel
 from codevigil.parser import SessionParser, parse_session
 from codevigil.privacy import PrivacyViolationError
 from codevigil.projects import ProjectRegistry
-from codevigil.renderers.terminal import TerminalRenderer
+from codevigil.renderers.terminal import TerminalRenderer, WatchStatus
 from codevigil.types import Event, MetricSnapshot, Severity
+from codevigil.ui.progress import progress_reporter
 from codevigil.watcher import PollingSource
 
 # ---------------------------------------------------------------------------
@@ -76,9 +77,13 @@ def _add_report_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParse
     )
     p.add_argument(
         "--format",
-        choices=("json", "markdown"),
-        default="json",
-        help="Output format (default: json).",
+        choices=("json", "markdown", "csv"),
+        default=None,
+        help=(
+            "Output format. The per-session path supports json|markdown "
+            "(default: json); the --group-by cohort path supports "
+            "markdown|csv|json (default: markdown)."
+        ),
     )
     p.add_argument(
         "--output",
@@ -122,6 +127,33 @@ def _add_report_subparser(sub: argparse._SubParsersAction[argparse.ArgumentParse
             "2026-03-01:2026-03-15,2026-04-01:2026-04-15. "
             "Produces a signed delta table and a prose summary per metric. "
             "Incompatible with --group-by."
+        ),
+    )
+    p.add_argument(
+        "--experimental-correlations",
+        dest="experimental_correlations",
+        action="store_true",
+        default=False,
+        help=(
+            "EXPERIMENTAL: emit a Pearson correlation matrix across "
+            "per-session metrics in the cohort report appendix. Pearson "
+            "assumes normality and the cohort metrics are not validated "
+            "against labeled outcomes — interpret as exploratory signal "
+            "only, never as causal evidence."
+        ),
+    )
+    p.add_argument(
+        "--pivot-date",
+        dest="pivot_date",
+        type=str,
+        default=None,
+        metavar="YYYY-MM-DD",
+        help=(
+            "Split the corpus into 'before' and 'after' buckets at this date "
+            "(after-bucket inclusive) and emit a Before/After delta table. "
+            "Sessions whose started_at falls strictly before the date land "
+            "in the before bucket; sessions on or after land in the after "
+            "bucket. Incompatible with --group-by and --compare-periods."
         ),
     )
 
@@ -270,6 +302,7 @@ def _format_error(err: CodevigilError) -> str:
 
 _shutdown_requested: bool = False
 _shutdown_event: threading.Event = threading.Event()
+_watch_phase_hook: Any = None
 
 
 def _install_sigint_handler() -> None:
@@ -350,12 +383,14 @@ def _run_ingest(args: argparse.Namespace) -> int:
         return 2
 
     try:
+        reporter = progress_reporter(total_items=None)
         result = run_ingest(
             root=root,
             store=store,
             config=cfg,
             console=console,
             force=bool(getattr(args, "force", False)),
+            reporter=reporter,
         )
     finally:
         store.close()
@@ -376,17 +411,29 @@ def _run_one_tick(
     renderer: TerminalRenderer,
     *,
     explain: bool,
-) -> None:
+) -> bool:
     """Execute a single watch tick: collect pairs, render each session."""
+    if callable(_watch_phase_hook):
+        _watch_phase_hook("scanning")
     try:
         pairs = list(aggregator.tick())
     except CodevigilError as err:
+        if callable(_watch_phase_hook):
+            _watch_phase_hook("error")
         renderer.render_error(err, None)
         pairs = []
+        had_error = True
+    else:
+        if callable(_watch_phase_hook):
+            _watch_phase_hook("aggregating")
+        had_error = False
     renderer.begin_tick()
+    if callable(_watch_phase_hook):
+        _watch_phase_hook("rendering")
     for meta, snapshots in pairs:
         renderer.render(_apply_explain_to_snapshots(snapshots, explain=explain), meta)
     renderer.end_tick()
+    return not had_error
 
 
 def _configure_timing_logger() -> None:
@@ -565,7 +612,7 @@ def _auto_ingest_if_missing(
 
 
 def _run_watch(args: argparse.Namespace) -> int:
-    global _shutdown_requested
+    global _shutdown_requested, _watch_phase_hook
     _shutdown_requested = False
     _configure_timing_logger()
     try:
@@ -631,29 +678,62 @@ def _run_watch(args: argparse.Namespace) -> int:
     )
     explain = bool(args.explain)
     tick_interval = float(watch_cfg["tick_interval"])
+    heartbeat_interval = min(0.25, tick_interval) if tick_interval > 0 else 0.25
     _shutdown_event.clear()
     _install_sigint_handler()
+    now = datetime.now(tz=UTC)
+    watch_status = WatchStatus(
+        phase="sleeping",
+        refresh_interval=tick_interval,
+        next_refresh_at=now,
+    )
+    renderer.set_watch_status(watch_status)
+
+    def _phase_hook(phase: str) -> None:
+        _update_watch_phase(renderer, watch_status, phase)
+
+    _watch_phase_hook = _phase_hook
 
     try:
         while True:
-            _run_one_tick(aggregator, renderer, explain=explain)
+            refresh_succeeded = _run_one_tick(aggregator, renderer, explain=explain)
+            now = datetime.now(tz=UTC)
+            if refresh_succeeded:
+                watch_status.last_refresh_at = now
+                watch_status.phase = "sleeping"
+            else:
+                watch_status.last_error_at = now
+                watch_status.phase = "error"
+            watch_status.next_refresh_at = now + timedelta(seconds=tick_interval)
+            renderer.refresh_status()
             if _shutdown_pending():
                 break
-            # Interruptible sleep: ``Event.wait`` returns immediately when
-            # the SIGINT/SIGTERM handler calls ``_shutdown_event.set()``,
-            # so Ctrl+C never waits for the full tick interval (60 s by
-            # default) before the program exits. ``wait`` returns True on
-            # early wake-up and False on normal timeout; either way the
-            # flag check on the next line settles it.
-            _shutdown_event.wait(tick_interval)
-            if _shutdown_pending():
-                break
+            while True:
+                if _shutdown_pending():
+                    break
+                assert watch_status.next_refresh_at is not None
+                remaining = (watch_status.next_refresh_at - datetime.now(tz=UTC)).total_seconds()
+                if remaining <= 0:
+                    break
+                watch_status.spinner_step += 1
+                renderer.refresh_status()
+                _shutdown_event.wait(min(heartbeat_interval, max(0.0, remaining)))
     finally:
+        _watch_phase_hook = None
         aggregator.close()
         renderer.close()
         sys.stdout.write("\ncodevigil shutdown\n")
         sys.stdout.flush()
     return 0
+
+
+def _update_watch_phase(
+    renderer: TerminalRenderer,
+    status: WatchStatus,
+    phase: str,
+) -> None:
+    status.phase = phase
+    renderer.refresh_status()
 
 
 def _build_bootstrap_manager(cfg: dict[str, Any]) -> BootstrapManager | None:
@@ -847,13 +927,20 @@ def _run_report(args: argparse.Namespace) -> int:
         return 2 if err.level is ErrorLevel.CRITICAL else 1
     cfg = resolved.values
 
-    # Mutual exclusivity check for the two new flags.
+    # Mutual exclusivity check for the cohort flags.
     group_by: str | None = getattr(args, "group_by", None)
     compare_periods_arg: str | None = getattr(args, "compare_periods", None)
-    if group_by is not None and compare_periods_arg is not None:
+    pivot_date_arg: str | None = getattr(args, "pivot_date", None)
+    cohort_flags = [
+        ("--group-by", group_by),
+        ("--compare-periods", compare_periods_arg),
+        ("--pivot-date", pivot_date_arg),
+    ]
+    set_flags = [name for name, value in cohort_flags if value is not None]
+    if len(set_flags) > 1:
         sys.stderr.write(
-            "CRITICAL: cli.report.flag_conflict: "
-            "--group-by and --compare-periods are mutually exclusive\n"
+            f"CRITICAL: cli.report.flag_conflict: "
+            f"{' and '.join(set_flags)} are mutually exclusive\n"
         )
         return 2
 
@@ -869,6 +956,8 @@ def _run_report(args: argparse.Namespace) -> int:
         return _run_report_group_by(args, cfg=cfg, dimension=group_by)
     if compare_periods_arg is not None:
         return _run_report_compare_periods(args, cfg=cfg, raw_periods=compare_periods_arg)
+    if pivot_date_arg is not None:
+        return _run_report_pivot(args, cfg=cfg, raw_pivot=pivot_date_arg)
 
     # Multi-period default path: when neither --from nor --to is supplied,
     # compute today / 7d / 30d windows relative to now(UTC) and render three
@@ -896,8 +985,23 @@ def _run_report(args: argparse.Namespace) -> int:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
 
-    files = sorted(_expand_path_argument(args.path), key=lambda p: str(p))
-    files = _filter_by_date(files, from_dt=from_dt, to_dt=to_dt)
+    discovered_files = sorted(_expand_path_argument(args.path), key=lambda p: str(p))
+    reporter = progress_reporter(total_items=len(discovered_files))
+    reporter.start(
+        phase="discovering inputs",
+        total=len(discovered_files),
+        message="resolving session files",
+        unit="files",
+        target=args.path,
+    )
+    reporter.update(phase="filtering", message="applying date filters", target="")
+    files = _filter_by_date(discovered_files, from_dt=from_dt, to_dt=to_dt)
+    reporter.set_total(len(files))
+    reporter.update(
+        phase="loading sessions",
+        message=f"{len(files)} matching files",
+        target="",
+    )
 
     session_reports: list[_SessionReport] = []
     exit_code = 0
@@ -906,14 +1010,26 @@ def _run_report(args: argparse.Namespace) -> int:
         session_reports.append(report)
         if report.parse_confidence < 0.9:
             exit_code = 2
-
+        reporter.advance(message="loading sessions", target=path.name)
+    reporter.update(
+        phase="rendering",
+        message=f"{len(session_reports)} session reports",
+        target="",
+    )
+    target_name = output_file.name if output_file is not None else str(output_dir)
+    reporter.update(
+        phase="writing output",
+        message="rendering report",
+        target=target_name,
+    )
     _emit_single_period_report(
         session_reports,
         output_dir,
-        fmt=args.format,
+        fmt=args.format or "json",
         explain=bool(args.explain),
         output_file=output_file,
     )
+    reporter.finish(message="report complete")
     return exit_code
 
 
@@ -926,9 +1042,14 @@ def _run_report_group_by(
     """Run the cohort trend table report for ``--group-by DIMENSION``."""
     from typing import cast
 
-    from codevigil.analysis.cohort import GroupByDimension
+    from codevigil.analysis.cohort import GroupByDimension, reduce_by
     from codevigil.report.loader import expand_to_jsonl_paths, load_reports_from_jsonl
-    from codevigil.report.renderer import render_group_by_report
+    from codevigil.report.renderer import (
+        render_correlations_section,
+        render_group_by_csv,
+        render_group_by_json,
+        render_group_by_report,
+    )
 
     if dimension not in VALID_DIMENSIONS:
         sys.stderr.write(
@@ -950,21 +1071,63 @@ def _run_report_group_by(
     to_dt = _parse_date_filter(getattr(args, "to_date", None), end_of_day=True)
 
     paths = expand_to_jsonl_paths(args.path)
+    reporter = progress_reporter(total_items=len(paths))
+    reporter.start(
+        phase="discovering inputs",
+        total=len(paths),
+        message="group-by analysis",
+        unit="files",
+        target=args.path,
+    )
+    reporter.update(phase="loading sessions", message="loading sessions", target="")
     store_reports = load_reports_from_jsonl(
-        paths, cfg=cfg, from_timestamp=from_dt, to_timestamp=to_dt
-    )
-
-    payload = render_group_by_report(
-        store_reports,
-        dimension=cast(GroupByDimension, dimension),
-        since=since_date,
-        until=until_date,
+        paths,
         cfg=cfg,
+        from_timestamp=from_dt,
+        to_timestamp=to_dt,
+        on_path_loaded=lambda path, index, total: reporter.advance(
+            message=f"{index}/{total} files",
+            target=path.name,
+        ),
     )
+    reporter.update(phase="rendering", message=f"grouping by {dimension}")
+
+    from codevigil.analysis.cohort import filter_by_period
+
+    filtered = filter_by_period(store_reports, since=since_date, until=until_date)
+    cohort = reduce_by(filtered, cast(GroupByDimension, dimension))
+
+    fmt = getattr(args, "format", None) or "markdown"
+    if fmt == "json":
+        payload = render_group_by_json(cohort, reports=filtered)
+        ext = "json"
+    elif fmt == "csv":
+        payload = render_group_by_csv(cohort)
+        ext = "csv"
+    else:
+        payload = render_group_by_report(
+            store_reports,
+            dimension=cast(GroupByDimension, dimension),
+            since=since_date,
+            until=until_date,
+            cfg=cfg,
+        )
+        if getattr(args, "experimental_correlations", False):
+            payload = payload + render_correlations_section(filtered) + "\n"
+        ext = "md"
+
     output_dir.mkdir(parents=True, exist_ok=True)
-    _write_report(output_dir / f"cohort_{dimension}.md", payload)
+    out_name = f"cohort_{dimension}.{ext}"
+    out_path = output_dir / out_name
+    reporter.update(
+        phase="writing output",
+        message=f"writing {fmt} report",
+        target=out_name,
+    )
+    _write_report(out_path, payload)
     sys.stdout.write(payload)
     sys.stdout.flush()
+    reporter.finish(message="group-by report complete")
     return 0
 
 
@@ -995,11 +1158,28 @@ def _run_report_compare_periods(
         return 2
 
     paths = expand_to_jsonl_paths(args.path)
+    reporter = progress_reporter(total_items=len(paths))
+    reporter.start(
+        phase="discovering inputs",
+        total=len(paths),
+        message="comparing periods",
+        unit="files",
+        target=args.path,
+    )
+    reporter.update(phase="loading sessions", message="loading sessions", target="")
     # No --from/--to date filtering at the event level for compare-periods:
     # that path already splits sessions by period-date ranges at the renderer
     # level. Event-level filtering is transparent here because we load all
     # sessions and let the renderer bucket them by session-level started_at.
-    store_reports = load_reports_from_jsonl(paths, cfg=cfg)
+    store_reports = load_reports_from_jsonl(
+        paths,
+        cfg=cfg,
+        on_path_loaded=lambda path, index, total: reporter.advance(
+            message=f"{index}/{total} files",
+            target=path.name,
+        ),
+    )
+    reporter.update(phase="rendering", message="building comparison")
 
     payload = render_compare_periods_report(
         store_reports,
@@ -1010,9 +1190,110 @@ def _run_report_compare_periods(
         cfg=cfg,
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    reporter.update(
+        phase="writing output",
+        message="writing markdown report",
+        target="compare_periods.md",
+    )
     _write_report(output_dir / "compare_periods.md", payload)
     sys.stdout.write(payload)
     sys.stdout.flush()
+    reporter.finish(message="compare-periods report complete")
+    return 0
+
+
+def _run_report_pivot(
+    args: argparse.Namespace,
+    *,
+    cfg: dict[str, Any],
+    raw_pivot: str,
+) -> int:
+    """Run the change-point pivot report for ``--pivot-date YYYY-MM-DD``.
+
+    Splits the corpus at the pivot date and reuses the existing
+    period-comparator: period A = (corpus_min_date, pivot - 1 day),
+    period B = (pivot, corpus_max_date). The pivot is inclusive of the
+    'after' bucket.
+    """
+    from datetime import date as date_cls
+    from datetime import timedelta
+
+    from codevigil.report.loader import expand_to_jsonl_paths, load_reports_from_jsonl
+    from codevigil.report.renderer import render_compare_periods_report
+
+    pivot = _parse_date_only(raw_pivot)
+    if pivot is None:
+        sys.stderr.write(
+            f"CRITICAL: cli.report.bad_pivot_date: expected YYYY-MM-DD, got {raw_pivot!r}\n"
+        )
+        return 2
+
+    try:
+        output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
+    except PrivacyViolationError as exc:
+        sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
+        return 2
+
+    paths = expand_to_jsonl_paths(args.path)
+    reporter = progress_reporter(total_items=len(paths))
+    reporter.start(
+        phase="discovering inputs",
+        total=len(paths),
+        message="pivot analysis",
+        unit="files",
+        target=args.path,
+    )
+    reporter.update(phase="loading sessions", message="loading sessions", target="")
+    store_reports = load_reports_from_jsonl(
+        paths,
+        cfg=cfg,
+        on_path_loaded=lambda path, index, total: reporter.advance(
+            message=f"{index}/{total} files",
+            target=path.name,
+        ),
+    )
+
+    if not store_reports:
+        sys.stderr.write("CRITICAL: cli.report.empty_corpus: no sessions loaded\n")
+        return 2
+
+    corpus_dates = [r.started_at.date() for r in store_reports]
+    corpus_min: date_cls = min(corpus_dates)
+    corpus_max: date_cls = max(corpus_dates)
+    if pivot <= corpus_min or pivot > corpus_max:
+        sys.stderr.write(
+            f"CRITICAL: cli.report.pivot_out_of_range: "
+            f"pivot {pivot} must lie strictly inside corpus range "
+            f"({corpus_min}..{corpus_max})\n"
+        )
+        return 2
+
+    before_until = pivot - timedelta(days=1)
+    reporter.update(
+        phase="rendering",
+        message=f"pivot at {pivot}",
+        target=f"before={corpus_min}..{before_until}",
+    )
+
+    payload = render_compare_periods_report(
+        store_reports,
+        period_a_since=corpus_min,
+        period_a_until=before_until,
+        period_b_since=pivot,
+        period_b_until=corpus_max,
+        cfg=cfg,
+    )
+    output_dir.mkdir(parents=True, exist_ok=True)
+    out_name = f"pivot_{pivot.isoformat()}.md"
+    reporter.update(
+        phase="writing output",
+        message="writing markdown report",
+        target=out_name,
+    )
+    _write_report(output_dir / out_name, payload)
+    sys.stdout.write(payload)
+    sys.stdout.flush()
+    reporter.finish(message="pivot report complete")
     return 0
 
 
@@ -1062,15 +1343,38 @@ def _run_report_multi_period(
     ]
 
     paths = expand_to_jsonl_paths(args.path)
-    period_reports = load_reports_for_windows(paths, windows, cfg=cfg)
+    reporter = progress_reporter(total_items=len(paths) * len(windows))
+    reporter.start(
+        phase="discovering inputs",
+        total=len(paths) * len(windows),
+        message="multi-period analysis",
+        unit="loads",
+        target=args.path,
+    )
+    reporter.update(phase="loading sessions", message="loading windows", target="")
+    period_reports = load_reports_for_windows(
+        paths,
+        windows,
+        cfg=cfg,
+        on_path_loaded=lambda label, path, index, total: reporter.advance(
+            message=f"{label} {index}/{total}",
+            target=path.name,
+        ),
+    )
 
     fmt: str = getattr(args, "format", "json")
+    reporter.update(phase="rendering", message="rendering multi-period report", target="")
     if fmt == "json":
         payload = _render_multi_period_json(period_reports)
         default_name = "report_multi_period.json"
     else:
         payload = render_multi_period(period_reports)
         default_name = "report_multi_period.txt"
+    reporter.update(
+        phase="writing output",
+        message="writing report payload",
+        target=default_name if output_file is None else output_file.name,
+    )
     _write_report_payload(
         payload=payload,
         default_name=default_name,
@@ -1080,6 +1384,7 @@ def _run_report_multi_period(
 
     sys.stdout.write(payload)
     sys.stdout.flush()
+    reporter.finish(message="multi-period report complete")
     return 0
 
 
@@ -1494,7 +1799,22 @@ def _run_history(args: argparse.Namespace) -> int:
     rest = remainder[1:]
 
     if subcmd == "list":
-        return _run_history_list(rest, run_list=run_list, parse_date_arg=parse_date_arg)
+        reporter = progress_reporter(total_items=None)
+        reporter.start(
+            phase="scanning store",
+            total=None,
+            message="listing sessions",
+            unit="sessions",
+        )
+        try:
+            return _run_history_list(
+                rest,
+                run_list=run_list,
+                parse_date_arg=parse_date_arg,
+                reporter=reporter,
+            )
+        finally:
+            reporter.finish(message="history list complete")
 
     if subcmd == "diff":
         if len(rest) < 2:
@@ -1517,6 +1837,7 @@ def _run_history_list(
     *,
     run_list: Any,
     parse_date_arg: Any,
+    reporter: Any = None,
 ) -> int:
     """Parse ``history list`` flags and invoke ``run_list``."""
     p = argparse.ArgumentParser(prog="codevigil history list", add_help=True)
@@ -1550,6 +1871,7 @@ def _run_history_list(
         severity=parsed.severity,
         model=parsed.model,
         permission_mode=parsed.permission_mode,
+        reporter=reporter,
     )
 
 
