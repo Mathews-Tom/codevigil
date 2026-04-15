@@ -292,6 +292,10 @@ def _install_sigint_handler() -> None:
     signal.signal(signal.SIGTERM, _handler)
 
 
+def _shutdown_pending() -> bool:
+    return _shutdown_requested or _shutdown_event.is_set()
+
+
 def _run_ingest(args: argparse.Namespace) -> int:
     """Cold-ingest every JSONL session into the processed-session store.
 
@@ -633,7 +637,7 @@ def _run_watch(args: argparse.Namespace) -> int:
     try:
         while True:
             _run_one_tick(aggregator, renderer, explain=explain)
-            if _shutdown_requested or _shutdown_event.is_set():
+            if _shutdown_pending():
                 break
             # Interruptible sleep: ``Event.wait`` returns immediately when
             # the SIGINT/SIGTERM handler calls ``_shutdown_event.set()``,
@@ -642,7 +646,7 @@ def _run_watch(args: argparse.Namespace) -> int:
             # early wake-up and False on normal timeout; either way the
             # flag check on the next line settles it.
             _shutdown_event.wait(tick_interval)
-            if _shutdown_requested or _shutdown_event.is_set():
+            if _shutdown_pending():
                 break
     finally:
         aggregator.close()
@@ -775,6 +779,33 @@ class _SessionReport:
     metrics: list[MetricSnapshot]
 
 
+def _resolve_report_output_target(
+    *,
+    cfg: dict[str, Any],
+    output_dir_override: Path | None,
+    output_file_override: Path | None,
+) -> tuple[Path | None, Path | None]:
+    if output_file_override is not None:
+        return None, _resolve_report_output_file(output_file_override)
+    return _resolve_report_output_dir(cfg, override=output_dir_override), None
+
+
+def _write_report_payload(
+    *,
+    payload: str,
+    default_name: str,
+    output_dir: Path | None,
+    output_file: Path | None,
+) -> None:
+    if output_file is not None:
+        output_file.parent.mkdir(parents=True, exist_ok=True)
+        _write_report(output_file, payload)
+        return
+    assert output_dir is not None
+    output_dir.mkdir(parents=True, exist_ok=True)
+    _write_report(output_dir / default_name, payload)
+
+
 def _emit_single_period_report(
     session_reports: list[_SessionReport],
     output_dir: Path | None,
@@ -797,14 +828,12 @@ def _emit_single_period_report(
     else:
         payload = _render_report_markdown(session_reports, explain=explain)
         default_name = "report.md"
-
-    if output_file is not None:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        _write_report(output_file, payload)
-    else:
-        assert output_dir is not None
-        output_dir.mkdir(parents=True, exist_ok=True)
-        _write_report(output_dir / default_name, payload)
+    _write_report_payload(
+        payload=payload,
+        default_name=default_name,
+        output_dir=output_dir,
+        output_file=output_file,
+    )
 
     sys.stdout.write(payload)
     sys.stdout.flush()
@@ -857,13 +886,12 @@ def _run_report(args: argparse.Namespace) -> int:
         sys.stderr.write(f"CRITICAL: cli.report.bad_date: --to {args.to_date!r}\n")
         return 2
 
-    output_file: Path | None = None
-    output_dir: Path | None = None
     try:
-        if output_file_arg is not None:
-            output_file = _resolve_report_output_file(output_file_arg)
-        else:
-            output_dir = _resolve_report_output_dir(cfg, override=args.output)
+        output_dir, output_file = _resolve_report_output_target(
+            cfg=cfg,
+            output_dir_override=args.output,
+            output_file_override=output_file_arg,
+        )
     except PrivacyViolationError as exc:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
@@ -1014,13 +1042,12 @@ def _run_report_multi_period(
     from codevigil.report.renderer import render_multi_period
 
     output_file_arg: Path | None = getattr(args, "output_file", None)
-    output_file: Path | None = None
-    output_dir: Path | None = None
     try:
-        if output_file_arg is not None:
-            output_file = _resolve_report_output_file(output_file_arg)
-        else:
-            output_dir = _resolve_report_output_dir(cfg, override=getattr(args, "output", None))
+        output_dir, output_file = _resolve_report_output_target(
+            cfg=cfg,
+            output_dir_override=getattr(args, "output", None),
+            output_file_override=output_file_arg,
+        )
     except PrivacyViolationError as exc:
         sys.stderr.write(f"CRITICAL: report.path_scope_violation: {exc}\n")
         return 2
@@ -1044,14 +1071,12 @@ def _run_report_multi_period(
     else:
         payload = render_multi_period(period_reports)
         default_name = "report_multi_period.txt"
-
-    if output_file is not None:
-        output_file.parent.mkdir(parents=True, exist_ok=True)
-        _write_report(output_file, payload)
-    else:
-        assert output_dir is not None
-        output_dir.mkdir(parents=True, exist_ok=True)
-        _write_report(output_dir / default_name, payload)
+    _write_report_payload(
+        payload=payload,
+        default_name=default_name,
+        output_dir=output_dir,
+        output_file=output_file,
+    )
 
     sys.stdout.write(payload)
     sys.stdout.flush()
