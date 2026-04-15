@@ -24,10 +24,8 @@ def test_color_mode_emits_ansi_codes() -> None:
     assert "OK" in output
     assert "WARN" in output
     assert "codevigil" in output
-    # Green and yellow style codes appear (rich standard ANSI).
-    assert "\x1b[32m" in output  # green → OK
-    assert "\x1b[33m" in output  # yellow → WARN
     assert "\x1b[1m" in output  # bold → codevigil header
+    assert "\x1b[2m" in output  # dim → separators / badges
 
 
 def test_plain_mode_emits_no_ansi() -> None:

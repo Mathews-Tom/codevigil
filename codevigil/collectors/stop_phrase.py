@@ -310,6 +310,32 @@ class StopPhraseCollector:
         self._hits_by_category.clear()
         self._recent_hits.clear()
 
+    def serialize_state(self) -> dict[str, Any]:
+        """Return a JSON-serialisable snapshot of collector state."""
+
+        return {
+            "messages": self._messages,
+            "hits": self._hits,
+            "messages_with_hit": self._messages_with_hit,
+            "hits_by_category": dict(self._hits_by_category),
+            "recent_hits": list(self._recent_hits),
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        self._messages = int(state.get("messages", 0))
+        self._hits = int(state.get("hits", 0))
+        self._messages_with_hit = int(state.get("messages_with_hit", 0))
+        raw_cats = state.get("hits_by_category", {})
+        self._hits_by_category = (
+            {str(k): int(v) for k, v in raw_cats.items()} if isinstance(raw_cats, dict) else {}
+        )
+        raw_recent = state.get("recent_hits", [])
+        self._recent_hits = (
+            [dict(h) for h in raw_recent if isinstance(h, dict)]
+            if isinstance(raw_recent, list)
+            else []
+        )
+
 
 def _default_config() -> dict[str, Any]:
     return dict(CONFIG_DEFAULTS["collectors"]["stop_phrase"])

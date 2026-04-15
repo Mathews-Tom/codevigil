@@ -32,13 +32,26 @@ from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource
 CONFIG_DEFAULTS: dict[str, Any] = {
     "watch": {
         "root": "~/.claude/projects",
-        "poll_interval": 2.0,
+        "poll_interval": 60.0,
         "max_files": 2000,
         "large_file_warn_bytes": 10 * 1024 * 1024,
         "stale_after_seconds": 300,
         "evict_after_seconds": 2100,
-        "tick_interval": 1.0,
+        "tick_interval": 60.0,
         "display_limit": 20,
+        # Persistent per-file cursor cache (Phase B). When enabled the
+        # watcher resumes each file from its last saved byte offset on
+        # startup instead of re-reading every JSONL from byte 0. Set to
+        # false to disable the cache entirely (useful for diagnostics
+        # and for fully reproducible cold-start benchmarks).
+        "cursor_cache_enabled": True,
+        "cursor_cache_dir": "~/.local/state/codevigil",
+        # Phase C4: TUI display mode. "project" (default) rolls up all
+        # active sessions into one row per project; "session" shows the
+        # classic per-session block view. The ``--by-session`` CLI flag
+        # flips to session mode for a single invocation.
+        "display_mode": "project",
+        "display_project_limit": 10,
     },
     "collectors": {
         "enabled": ["read_edit_ratio", "stop_phrase", "reasoning_loop"],
@@ -627,6 +640,7 @@ _RANGE_CHECKS: tuple[tuple[str, float, float, str], ...] = (
     ("watch.evict_after_seconds", 1, 86_400, "int"),
     ("watch.large_file_warn_bytes", 1024, 10**12, "int"),
     ("watch.display_limit", 1, 500, "int"),
+    ("watch.display_project_limit", 1, 100, "int"),
     ("collectors.read_edit_ratio.window_size", 1, 100_000, "int"),
     ("collectors.read_edit_ratio.blind_edit_window", 1, 10_000, "int"),
     ("collectors.read_edit_ratio.blind_edit_confidence_floor", 0.0, 1.0, "float"),

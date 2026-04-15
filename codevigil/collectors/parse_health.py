@@ -95,6 +95,36 @@ class ParseHealthCollector:
         self._window.clear()
         self._stats = ParseStats()
 
+    def serialize_state(self) -> dict[str, Any]:
+        """Return a JSON-serialisable snapshot of collector state.
+
+        The rolling event deque is not persisted — Event objects are
+        not round-trippable without parsing JSONL — but the aggregated
+        :class:`ParseStats` counters are, and they are what actually
+        drive the metric severity. On restore the window length is
+        reset to zero; the next ingested events repopulate it.
+        """
+
+        return {
+            "total_lines": self._stats.total_lines,
+            "parsed_events": self._stats.parsed_events,
+            "duplicate_count": self._stats.duplicate_count,
+            "missing_fields": dict(self._stats.missing_fields),
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        """Restore aggregate counters from a previously-serialised state."""
+
+        stats = ParseStats()
+        stats.total_lines = int(state.get("total_lines", 0))
+        stats.parsed_events = int(state.get("parsed_events", 0))
+        stats.duplicate_count = int(state.get("duplicate_count", 0))
+        raw_fields = state.get("missing_fields", {})
+        if isinstance(raw_fields, dict):
+            stats.missing_fields = {str(k): int(v) for k, v in raw_fields.items()}
+        self._stats = stats
+        self._window.clear()
+
 
 def _default_config() -> dict[str, Any]:
     return dict(CONFIG_DEFAULTS["collectors"]["parse_health"])

@@ -295,6 +295,49 @@ class ReadEditRatioCollector:
         self._write_calls = 0
         self._edit_calls = 0
 
+    def serialize_state(self) -> dict[str, Any]:
+        """Return a JSON-serialisable snapshot of collector state.
+
+        Everything the collector mutates on ``ingest`` is persisted so
+        a resumed session's ratio, blind-edit counts, and per-file
+        read-history all pick up exactly where the previous run left
+        off. The rolling window deque is serialised as an ordered
+        list of category strings and restored in order.
+        """
+
+        return {
+            "classifications": list(self._classifications),
+            "counts": dict(self._counts),
+            "classified_index": self._classified_index,
+            "last_seen_read": dict(self._last_seen_read),
+            "mutations_total": self._mutations_total,
+            "mutations_with_path": self._mutations_with_path,
+            "blind_mutations": self._blind_mutations,
+            "write_calls": self._write_calls,
+            "edit_calls": self._edit_calls,
+        }
+
+    def restore_state(self, state: dict[str, Any]) -> None:
+        self._classifications.clear()
+        raw_classifications = state.get("classifications", [])
+        if isinstance(raw_classifications, list):
+            for item in raw_classifications:
+                if isinstance(item, str) and item in ("read", "research", "mutation", "other"):
+                    self._classifications.append(item)  # type: ignore[arg-type]
+        raw_counts = state.get("counts", {})
+        if isinstance(raw_counts, dict):
+            for key in ("read", "research", "mutation", "other"):
+                self._counts[key] = int(raw_counts.get(key, 0))
+        self._classified_index = int(state.get("classified_index", 0))
+        raw_last_seen = state.get("last_seen_read", {})
+        if isinstance(raw_last_seen, dict):
+            self._last_seen_read = {str(k): int(v) for k, v in raw_last_seen.items()}
+        self._mutations_total = int(state.get("mutations_total", 0))
+        self._mutations_with_path = int(state.get("mutations_with_path", 0))
+        self._blind_mutations = int(state.get("blind_mutations", 0))
+        self._write_calls = int(state.get("write_calls", 0))
+        self._edit_calls = int(state.get("edit_calls", 0))
+
 
 def _default_config() -> dict[str, Any]:
     return dict(CONFIG_DEFAULTS["collectors"]["read_edit_ratio"])

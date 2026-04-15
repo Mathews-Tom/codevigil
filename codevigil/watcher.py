@@ -54,8 +54,11 @@ back-dating derivation.
 
 from __future__ import annotations
 
+import hashlib
+import logging
 import os
 import stat
+import time
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -65,8 +68,11 @@ from typing import Protocol, runtime_checkable
 
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.privacy import PrivacyViolationError
+from codevigil.watcher_cache import CachedCursor, CursorStore, prefix_fingerprint_for_path
 
 _CHUNK_SIZE: int = 1 * 1024 * 1024  # 1 MiB delta read chunk
+
+_LOG = logging.getLogger(__name__)
 
 
 class SourceEventKind(Enum):
@@ -172,6 +178,8 @@ class PollingSource:
         interval: float = 2.0,
         max_files: int = 2000,
         large_file_warn_bytes: int = 10 * 1024 * 1024,
+        cache_path: Path | None = None,
+        seed_cursors: dict[Path, CachedCursor] | None = None,
     ) -> None:
         self._interval: float = interval
         self._max_files: int = max_files
@@ -179,6 +187,27 @@ class PollingSource:
         self._cursors: dict[Path, FileCursor] = {}
         self._overflow_warned: bool = False
         self._root: Path = self._validate_root(root)
+        # First-tick instrumentation: log cold-start costs at INFO so users
+        # can see where the startup wall-clock went without enabling DEBUG.
+        self._first_poll_done: bool = False
+        self._bytes_read_this_poll: int = 0
+        # Persistent cursor cache (Phase B): populated from disk at
+        # construction time, consulted the first time ``_handle_path``
+        # encounters each file, and written back from :meth:`close`.
+        # Phase C passes pre-loaded seeds from the processed-session
+        # store via ``seed_cursors``, taking precedence over ``cache_path``.
+        self._cursor_store: CursorStore | None = None
+        self._pending_seeds: dict[Path, CachedCursor] = {}
+        if seed_cursors is not None:
+            self._pending_seeds = dict(seed_cursors)
+        elif cache_path is not None:
+            self._cursor_store = CursorStore(cache_path, self._root)
+            self._pending_seeds = self._cursor_store.load()
+            _LOG.info(
+                "watcher.cursor_cache_loaded path=%s entries=%d",
+                cache_path,
+                len(self._pending_seeds),
+            )
 
     @property
     def root(self) -> Path:
@@ -228,6 +257,7 @@ class PollingSource:
         "first ``max_files``" slice is stable across polls and platforms.
         """
 
+        walk_started = time.monotonic()
         discovered: list[Path] = []
         if not self._root.exists():
             return _WalkResult(files=[], overflowed=False, overflow_count=0)
@@ -250,6 +280,13 @@ class PollingSource:
                     continue
 
         discovered.sort(key=lambda p: str(p))
+        walk_elapsed = time.monotonic() - walk_started
+        _LOG.debug(
+            "watcher.walk elapsed_ms=%.2f discovered=%d max_files=%d",
+            walk_elapsed * 1000.0,
+            len(discovered),
+            self._max_files,
+        )
         if len(discovered) > self._max_files:
             return _WalkResult(
                 files=discovered[: self._max_files],
@@ -268,6 +305,8 @@ class PollingSource:
         happen inside this call, not lazily inside the consumer's loop.
         """
 
+        poll_started = time.monotonic()
+        self._bytes_read_this_poll = 0
         events: list[SourceEvent] = []
         walk = self._walk()
         if walk.overflowed and not self._overflow_warned:
@@ -318,12 +357,74 @@ class PollingSource:
                 )
             )
 
+        poll_elapsed_ms = (time.monotonic() - poll_started) * 1000.0
+        fmt = "%s elapsed_ms=%.2f events=%d bytes_read=%d files_tracked=%d"
+        if not self._first_poll_done:
+            self._first_poll_done = True
+            _LOG.info(
+                fmt,
+                "watcher.first_poll",
+                poll_elapsed_ms,
+                len(events),
+                self._bytes_read_this_poll,
+                len(self._cursors),
+            )
+        else:
+            _LOG.debug(
+                fmt,
+                "watcher.poll",
+                poll_elapsed_ms,
+                len(events),
+                self._bytes_read_this_poll,
+                len(self._cursors),
+            )
+
         return iter(events)
 
     def close(self) -> None:
-        """Drop the cursor table. No OS handles are held between polls."""
+        """Drop the cursor table. No OS handles are held between polls.
 
+        When a persistent cursor cache is configured, the current cursor
+        table is flushed to disk before being cleared so the next
+        ``watch`` invocation can resume from the last known offsets.
+        """
+
+        if self._cursor_store is not None:
+            self.flush_cursor_cache()
         self._cursors.clear()
+
+    def flush_cursor_cache(self) -> None:
+        """Write the current cursor table to the persistent cache file.
+
+        No-op when no ``cache_path`` was supplied at construction time.
+        Exposed as a public method so tests and long-lived processes can
+        flush without tearing down the source.
+        """
+
+        if self._cursor_store is None:
+            return
+        snapshot: dict[Path, CachedCursor] = {}
+        for path, cursor in self._cursors.items():
+            try:
+                mtime = path.stat().st_mtime
+            except (FileNotFoundError, PermissionError):
+                continue
+            prefix_fingerprint, prefix_bytes = prefix_fingerprint_for_path(path)
+            snapshot[path] = CachedCursor(
+                inode=cursor.inode,
+                size=cursor.size,
+                offset=cursor.offset,
+                pending=cursor.pending,
+                mtime=mtime,
+                prefix_fingerprint=prefix_fingerprint,
+                prefix_bytes=prefix_bytes,
+            )
+        self._cursor_store.save(snapshot)
+        _LOG.info(
+            "watcher.cursor_cache_saved path=%s entries=%d",
+            self._cursor_store.cache_path,
+            len(snapshot),
+        )
 
     # --------------------------------------------------------------- internals
 
@@ -337,7 +438,8 @@ class PollingSource:
     ) -> None:
         cursor = self._cursors.get(path)
         if cursor is None:
-            self._handle_new(path, inode, size, mtime, events)
+            seed = self._pending_seeds.pop(path, None)
+            self._handle_new(path, inode, size, mtime, events, seed=seed)
             return
         if inode != cursor.inode:
             events.append(
@@ -381,8 +483,26 @@ class PollingSource:
         events: list[SourceEvent],
         *,
         emit_new_session: bool = True,
+        seed: CachedCursor | None = None,
     ) -> None:
-        cursor = FileCursor(path=path, inode=inode, size=0, offset=0, pending=b"")
+        # Seeded resume: accept the cached offset only when the file's
+        # identity matches and its size has not shrunk. Any mismatch
+        # falls through to a fresh full-replay cursor (offset = 0).
+        start_offset = 0
+        pending = b""
+        accepted_seed = (
+            seed if self._seed_matches_file(path, inode=inode, size=size, seed=seed) else None
+        )
+        if accepted_seed is not None:
+            start_offset = accepted_seed.offset
+            pending = accepted_seed.pending
+        cursor = FileCursor(
+            path=path,
+            inode=inode,
+            size=start_offset,
+            offset=start_offset,
+            pending=pending,
+        )
         self._cursors[path] = cursor
         if emit_new_session:
             # Use the file's mtime as the NEW_SESSION timestamp so the
@@ -400,9 +520,30 @@ class PollingSource:
                     timestamp=mtime_dt,
                 )
             )
-        if size > 0:
-            self._maybe_warn_large_growth(path, cursor, size)
+        if size > start_offset:
+            self._maybe_warn_large_growth(path, cursor, size - start_offset)
             self._read_and_emit(path, cursor, size, events)
+
+    def _seed_matches_file(
+        self,
+        path: Path,
+        *,
+        inode: int,
+        size: int,
+        seed: CachedCursor | None,
+    ) -> bool:
+        if seed is None:
+            return False
+        if seed.inode != inode or seed.size > size:
+            return False
+        if not seed.prefix_fingerprint or seed.prefix_bytes <= 0:
+            return True
+        try:
+            with path.open("rb") as handle:
+                prefix = handle.read(seed.prefix_bytes)
+        except (FileNotFoundError, PermissionError):
+            return False
+        return hashlib.sha256(prefix).hexdigest() == seed.prefix_fingerprint
 
     def _maybe_warn_large_growth(
         self,
@@ -458,6 +599,7 @@ class PollingSource:
                     break
                 cursor.pending += chunk
                 remaining -= len(chunk)
+                self._bytes_read_this_poll += len(chunk)
                 while b"\n" in cursor.pending:
                     line_bytes, _, rest = cursor.pending.partition(b"\n")
                     cursor.pending = rest

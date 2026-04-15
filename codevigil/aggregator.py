@@ -67,6 +67,7 @@ from __future__ import annotations
 
 import dataclasses
 import hashlib
+import logging
 import time
 from collections import deque
 from collections.abc import Callable, Iterator
@@ -95,6 +96,8 @@ from codevigil.types import (
 from codevigil.watcher import Source, SourceEvent, SourceEventKind
 
 _PARSE_HEALTH_NAME: str = "parse_health"
+
+_LOG = logging.getLogger(__name__)
 
 
 @dataclass(slots=True)
@@ -175,6 +178,7 @@ class SessionAggregator:
         clock: _ClockFn = time.monotonic,
         registry: dict[str, type[Collector]] | None = None,
         bootstrap: BootstrapManager | None = None,
+        collector_state_provider: (Callable[[str], dict[str, dict[str, Any]] | None] | None) = None,
     ) -> None:
         self._source: Source = source
         self._config: dict[str, Any] = config
@@ -187,6 +191,16 @@ class SessionAggregator:
         self._clock: _ClockFn = clock
         self._sessions: dict[str, _SessionContext] = {}
         self._bootstrap: BootstrapManager | None = bootstrap
+        # Phase C5: collector-state restore provider. Given a session
+        # ID, returns a ``{collector_name: state_dict}`` mapping from
+        # the processed-session store, or ``None`` when no persisted
+        # state exists for that session. Called once from
+        # ``_ensure_session`` immediately after fresh collectors are
+        # constructed so the first ingest picks up accumulated rolling
+        # windows, read/edit counts, and stop-phrase hit history.
+        self._collector_state_provider: Callable[[str], dict[str, dict[str, Any]] | None] | None = (
+            collector_state_provider
+        )
 
         storage_cfg = config.get("storage", {})
         self._persistence_enabled: bool = bool(storage_cfg.get("enable_persistence", False))
@@ -211,6 +225,10 @@ class SessionAggregator:
         # Cohort size: number of live (non-evicted) sessions at the end of
         # the most recent tick. Callers may read either property between ticks.
         self._cohort_size: int = 0
+        # First-tick instrumentation gate: emit a single INFO summary after
+        # the cold-start tick so users can see where the startup wall-clock
+        # went without enabling DEBUG logging.
+        self._first_tick_logged: bool = False
 
     # --------------------------------------------------------------- properties
 
@@ -259,9 +277,14 @@ class SessionAggregator:
         """
 
         self._eviction_churn = 0
+        tick_started = time.monotonic()
+        source_events_ingested = 0
         for source_event in self._source.poll():
             self._dispatch_source_event(source_event)
+            source_events_ingested += 1
+        source_done = time.monotonic()
         self._run_lifecycle_pass()
+        lifecycle_done = time.monotonic()
 
         results: list[tuple[SessionMeta, list[MetricSnapshot]]] = []
         for ctx in self._sessions.values():
@@ -270,6 +293,41 @@ class SessionAggregator:
             snapshots = self._snapshot_session(ctx)
             results.append((self._build_meta(ctx), snapshots))
         self._cohort_size = len(results)
+
+        source_ms = (source_done - tick_started) * 1000.0
+        lifecycle_ms = (lifecycle_done - source_done) * 1000.0
+        snapshot_ms = (time.monotonic() - lifecycle_done) * 1000.0
+        fmt = (
+            "%s source_events=%d source_ingest_ms=%.2f lifecycle_ms=%.2f"
+            " snapshot_ms=%.2f sessions_tracked=%d sessions_yielded=%d"
+            " eviction_churn=%d"
+        )
+        if not self._first_tick_logged:
+            self._first_tick_logged = True
+            _LOG.info(
+                fmt,
+                "aggregator.first_tick",
+                source_events_ingested,
+                source_ms,
+                lifecycle_ms,
+                snapshot_ms,
+                len(self._sessions),
+                len(results),
+                self._eviction_churn,
+            )
+        else:
+            _LOG.debug(
+                fmt,
+                "aggregator.tick",
+                source_events_ingested,
+                source_ms,
+                lifecycle_ms,
+                snapshot_ms,
+                len(self._sessions),
+                len(results),
+                self._eviction_churn,
+            )
+
         return iter(results)
 
     def close(self) -> None:
@@ -321,6 +379,7 @@ class SessionAggregator:
             return existing
         parser = SessionParser(session_id=sid)
         collectors = self._instantiate_collectors(parser)
+        self._maybe_restore_collector_state(sid, collectors)
         now_clock = self._clock()
         now_wall = source_event.timestamp
         project_hash = self._extract_project_hash(source_event.path, session_id=sid)
@@ -344,6 +403,61 @@ class SessionAggregator:
         )
         self._sessions[sid] = ctx
         return ctx
+
+    def _maybe_restore_collector_state(
+        self,
+        session_id: str,
+        collectors: dict[str, Collector],
+    ) -> None:
+        """Hydrate collectors from persistent state when one is available.
+
+        When the caller configured ``collector_state_provider`` (Phase
+        C5 watch path), we consult the processed-session store keyed by
+        ``session_id``. A hit returns ``{collector_name: state_dict}``;
+        each collector that implements ``restore_state`` then hydrates
+        from its slice. Collectors that do not implement
+        ``restore_state`` (or that lack a matching key in the stored
+        state) are left in their default construction state — no-op.
+        """
+
+        if self._collector_state_provider is None:
+            return
+        state = self._collector_state_provider(session_id)
+        if not state:
+            return
+        for name, collector in collectors.items():
+            slice_ = state.get(name)
+            if not isinstance(slice_, dict):
+                continue
+            restore = getattr(collector, "restore_state", None)
+            if callable(restore):
+                try:
+                    restore(slice_)
+                except (TypeError, ValueError, KeyError):
+                    # Collector rejected the persisted shape (stale
+                    # schema, corrupted entry). Leave the collector
+                    # in its fresh default state and keep ingesting.
+                    continue
+
+    def serialize_collector_state(self, ctx: _SessionContext) -> dict[str, dict[str, Any]]:
+        """Return ``{collector_name: state_dict}`` for each collector
+        on ``ctx`` that implements :meth:`serialize_state`.
+
+        Callers use this to persist collector state into the
+        processed-session store at ingest time or at watch shutdown.
+        """
+
+        out: dict[str, dict[str, Any]] = {}
+        for name, collector in ctx.collectors.items():
+            serialize = getattr(collector, "serialize_state", None)
+            if callable(serialize):
+                try:
+                    payload = serialize()
+                    if isinstance(payload, dict):
+                        out[name] = dict(payload)
+                except (TypeError, ValueError):
+                    continue
+        return out
 
     def _extract_project_hash(self, path: Path, *, session_id: str) -> str:
         """Pull the project-hash directory from the canonical path layout.
@@ -440,16 +554,30 @@ class SessionAggregator:
             ctx.last_event_time = event.timestamp
             # Back-date the monotonic cursor using the event's own timestamp
             # so replayed batches of old events do not reset the lifecycle
-            # cursor forward.  For a live event, event.timestamp ≈ now so
-            # age ≈ 0 and last_monotonic ≈ self._clock() as before.
-            # Only advance last_monotonic — never move it backwards relative
-            # to what _ensure_session already set.
-            event_age = max(0.0, (datetime.now(UTC) - event.timestamp).total_seconds())
-            candidate = self._clock() - event_age
-            if candidate > ctx.last_monotonic:
-                ctx.last_monotonic = candidate
-            if ctx.state is SessionState.STALE:
-                # STALE → ACTIVE on a new APPEND (the "coffee break" rule).
+            # cursor forward. For a live event, ``event.timestamp ≈ now`` so
+            # age ≈ 0 and ``last_monotonic ≈ self._clock()`` as before.
+            # Only advance ``last_monotonic`` — never move it backwards
+            # relative to what ``_ensure_session`` already set.
+            #
+            # Events whose source JSONL line carried no parseable timestamp
+            # receive a ``datetime.now(UTC)`` fallback from the parser with
+            # ``timestamp_resolved=False``. Such events MUST NOT advance the
+            # monotonic cursor: a cold-replayed file full of pre-v1 records
+            # that lack timestamp fields would otherwise reset every
+            # session's ``last_monotonic`` to now, undoing the cold-start
+            # back-dating from ``_ensure_session`` and flagging 80-day-old
+            # sessions as ACTIVE. Leave ``last_monotonic`` pinned to the
+            # file's mtime so the first lifecycle pass evicts as intended.
+            if event.timestamp_resolved:
+                event_age = max(0.0, (datetime.now(UTC) - event.timestamp).total_seconds())
+                candidate = self._clock() - event_age
+                if candidate > ctx.last_monotonic:
+                    ctx.last_monotonic = candidate
+            if ctx.state is SessionState.STALE and event.timestamp_resolved:
+                # STALE → ACTIVE on a new APPEND with a real, resolved
+                # timestamp (the "coffee break" rule). Fallback-timestamped
+                # events cannot reliably signal new activity on a
+                # cold-replayed file, so they do not trigger the transition.
                 # Collector state is intentionally preserved.
                 ctx.state = SessionState.ACTIVE
             if event.kind is EventKind.SYSTEM:
