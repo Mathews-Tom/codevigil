@@ -54,6 +54,7 @@ back-dating derivation.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import stat
@@ -67,7 +68,7 @@ from typing import Protocol, runtime_checkable
 
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.privacy import PrivacyViolationError
-from codevigil.watcher_cache import CachedCursor, CursorStore
+from codevigil.watcher_cache import CachedCursor, CursorStore, prefix_fingerprint_for_path
 
 _CHUNK_SIZE: int = 1 * 1024 * 1024  # 1 MiB delta read chunk
 
@@ -408,12 +409,15 @@ class PollingSource:
                 mtime = path.stat().st_mtime
             except (FileNotFoundError, PermissionError):
                 continue
+            prefix_fingerprint, prefix_bytes = prefix_fingerprint_for_path(path)
             snapshot[path] = CachedCursor(
                 inode=cursor.inode,
                 size=cursor.size,
                 offset=cursor.offset,
                 pending=cursor.pending,
                 mtime=mtime,
+                prefix_fingerprint=prefix_fingerprint,
+                prefix_bytes=prefix_bytes,
             )
         self._cursor_store.save(snapshot)
         _LOG.info(
@@ -486,9 +490,12 @@ class PollingSource:
         # falls through to a fresh full-replay cursor (offset = 0).
         start_offset = 0
         pending = b""
-        if seed is not None and seed.inode == inode and seed.size <= size:
-            start_offset = seed.offset
-            pending = seed.pending
+        accepted_seed = (
+            seed if self._seed_matches_file(path, inode=inode, size=size, seed=seed) else None
+        )
+        if accepted_seed is not None:
+            start_offset = accepted_seed.offset
+            pending = accepted_seed.pending
         cursor = FileCursor(
             path=path,
             inode=inode,
@@ -516,6 +523,27 @@ class PollingSource:
         if size > start_offset:
             self._maybe_warn_large_growth(path, cursor, size - start_offset)
             self._read_and_emit(path, cursor, size, events)
+
+    def _seed_matches_file(
+        self,
+        path: Path,
+        *,
+        inode: int,
+        size: int,
+        seed: CachedCursor | None,
+    ) -> bool:
+        if seed is None:
+            return False
+        if seed.inode != inode or seed.size > size:
+            return False
+        if not seed.prefix_fingerprint or seed.prefix_bytes <= 0:
+            return True
+        try:
+            with path.open("rb") as handle:
+                prefix = handle.read(seed.prefix_bytes)
+        except (FileNotFoundError, PermissionError):
+            return False
+        return hashlib.sha256(prefix).hexdigest() == seed.prefix_fingerprint
 
     def _maybe_warn_large_growth(
         self,

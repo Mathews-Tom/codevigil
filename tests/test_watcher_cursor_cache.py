@@ -17,6 +17,7 @@ Invalidation cases:
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 from collections.abc import Iterator
@@ -70,6 +71,8 @@ def test_cursor_store_round_trip(tmp_path: Path) -> None:
                 offset=98765,
                 pending=b"partial",
                 mtime=1712345678.5,
+                prefix_fingerprint=hashlib.sha256(b"ignored\n").hexdigest(),
+                prefix_bytes=len(b"ignored\n"),
             )
         }
     )
@@ -82,6 +85,8 @@ def test_cursor_store_round_trip(tmp_path: Path) -> None:
     assert got.offset == 98765
     assert got.pending == b"partial"
     assert got.mtime == pytest.approx(1712345678.5)
+    assert got.prefix_bytes == len(b"ignored\n")
+    assert got.prefix_fingerprint == hashlib.sha256(b"ignored\n").hexdigest()
 
 
 def test_cursor_store_missing_file_returns_empty(tmp_path: Path) -> None:
@@ -250,6 +255,34 @@ def test_polling_source_resume_invalidated_on_inode_change(
     events = list(src2.poll())
     assert _appends(events) == ['{"rotated":1}', '{"rotated":2}']
     src2.close()
+
+
+def test_polling_source_resume_invalidated_when_prefix_changes_with_same_inode_seed(
+    fake_home: Path,
+) -> None:
+    sessions = session_dir(fake_home)
+    path = sessions / "s.jsonl"
+    path.write_text('{"rotated":1}\n{"rotated":2}\n', encoding="utf-8")
+
+    cache_path = fake_home / "cache.json"
+    CursorStore(cache_path, fake_home / ".claude" / "projects").save(
+        {
+            path.resolve(): CachedCursor(
+                inode=path.stat().st_ino,
+                size=len(b'{"a":1}\n'),
+                offset=len(b'{"a":1}\n'),
+                pending=b"",
+                mtime=1.0,
+                prefix_fingerprint=hashlib.sha256(b'{"a":1}\n').hexdigest(),
+                prefix_bytes=len(b'{"a":1}\n'),
+            )
+        }
+    )
+
+    src = PollingSource(fake_home / ".claude" / "projects", cache_path=cache_path)
+    events = list(src.poll())
+    assert _appends(events) == ['{"rotated":1}', '{"rotated":2}']
+    src.close()
 
 
 def test_polling_source_disabled_cache_writes_nothing(fake_home: Path) -> None:

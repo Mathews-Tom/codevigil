@@ -66,6 +66,7 @@ from pathlib import Path
 _LOG = logging.getLogger(__name__)
 
 _CACHE_VERSION: int = 1
+_FINGERPRINT_PREFIX_BYTES: int = 4096
 
 
 @dataclass(slots=True)
@@ -83,6 +84,26 @@ class CachedCursor:
     offset: int
     pending: bytes
     mtime: float
+    prefix_fingerprint: str = ""
+    prefix_bytes: int = 0
+
+
+def prefix_fingerprint_for_path(path: Path) -> tuple[str, int]:
+    """Return a stable digest of the file's leading bytes.
+
+    The watcher uses this as an additional identity signal when deciding
+    whether a persisted cursor can safely resume a path. Inode + size is
+    not strong enough on Linux because a delete-and-recreate can reuse an
+    inode immediately; hashing the leading prefix lets resume detect that
+    the file body is not the same file continuation.
+    """
+
+    try:
+        with path.open("rb") as handle:
+            prefix = handle.read(_FINGERPRINT_PREFIX_BYTES)
+    except (FileNotFoundError, PermissionError):
+        return "", 0
+    return hashlib.sha256(prefix).hexdigest(), len(prefix)
 
 
 def default_cache_path(state_dir: Path, root: Path) -> Path:
@@ -188,6 +209,8 @@ class CursorStore:
                     "offset": cursor.offset,
                     "pending_b64": base64.b64encode(cursor.pending).decode("ascii"),
                     "mtime": cursor.mtime,
+                    "prefix_fingerprint": cursor.prefix_fingerprint,
+                    "prefix_bytes": cursor.prefix_bytes,
                 }
             )
         payload = {
@@ -212,6 +235,8 @@ class CursorStore:
         offset_raw = entry.get("offset")
         pending_raw = entry.get("pending_b64", "")
         mtime_raw = entry.get("mtime")
+        fingerprint_raw = entry.get("prefix_fingerprint", "")
+        prefix_bytes_raw = entry.get("prefix_bytes", 0)
         if not isinstance(path_raw, str):
             return None
         if not isinstance(inode_raw, int) or not isinstance(size_raw, int):
@@ -221,6 +246,10 @@ class CursorStore:
         if not isinstance(pending_raw, str):
             return None
         if not isinstance(mtime_raw, (int, float)):
+            return None
+        if not isinstance(fingerprint_raw, str):
+            return None
+        if not isinstance(prefix_bytes_raw, int):
             return None
         try:
             pending = base64.b64decode(pending_raw, validate=True)
@@ -234,8 +263,15 @@ class CursorStore:
                 offset=offset_raw,
                 pending=pending,
                 mtime=float(mtime_raw),
+                prefix_fingerprint=fingerprint_raw,
+                prefix_bytes=prefix_bytes_raw,
             ),
         )
 
 
-__all__ = ["CachedCursor", "CursorStore", "default_cache_path"]
+__all__ = [
+    "CachedCursor",
+    "CursorStore",
+    "default_cache_path",
+    "prefix_fingerprint_for_path",
+]
