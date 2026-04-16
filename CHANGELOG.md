@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 no changes yet.
 
+## [0.3.0] - 2026-04-16
+
+This release graduates codevigil from a live-only watch dashboard to a persistent-memory tool with cold-ingest, cohort trend analysis at parity with anthropics/claude-code#42796, and a project-level watch roll-up. The 0.2.x watch command is preserved behind `--by-session`; the new default collapses multi-session projects into a single row.
+
+### Added
+
+- **Persistent processed-session store (SQLite)** (`analysis/processed_store.py`). `codevigil watch` now writes a durable record for every finalised session under `~/.local/state/codevigil/processed/` — session id, file id, cursor offset, collector state snapshot, and derived metric summary. The watcher seeds each polled file from the stored cursor so restarts no longer re-parse JSONL from byte 0. The collector state is restored verbatim so rolling windows survive across process restarts. See `docs/design.md §Persistent Memory` for schema, migration policy, and the key invariants the store upholds.
+- **`codevigil ingest` subcommand**. One-shot cold-ingest of every JSONL session under `watch.root` into the persistent store. Intended to be run once after install (or once after any `--force` rebuild) so subsequent `codevigil watch` ticks only process newly-appended events. Flags: `--db PATH` (override the store path) and `--force` (re-ingest every session, ignoring existing rows). Missing-store bootstrap is automatic: `codevigil watch` will invoke the ingest flow on first run if the store is absent.
+- **Per-file cursor cache** (`watcher_cache.py`). Opt-in-by-default persistent cache under `~/.local/state/codevigil/` that records `(inode, mtime, size, byte_offset)` per watched file. The watcher consults the cache on startup and seeks past already-processed bytes. Disable with `watch.cursor_cache_enabled = false` for fully reproducible cold-start benchmarks. Cache location is configurable via `watch.cursor_cache_dir`.
+- **Project-row watch view** (`renderers/terminal.py`). The default `codevigil watch` layout now rolls up every active session belonging to the same project into a single row showing the fleet-worst severity, the active session count, and the aggregate metric summary. The previous one-block-per-session layout is available via the new `--by-session` CLI flag or by setting `watch.display_mode = "session"` in config. `watch.display_project_limit` (default `10`) caps the number of project rows rendered per frame and is analogous to `watch.display_limit` for session mode.
+- **`thinking` collector** (`collectors/thinking.py`). Observes `EventKind.THINKING` events and exposes the visible-vs-redacted ratio plus median visible-block and signature-block character lengths. Headline signal for the #42796 "thinking depth decline" cohort analysis. Severity is always OK by design — the collector is descriptive, not a quality gate.
+- **`prompts` collector** (`collectors/prompts.py`). Counts user-message turns per session. Primary scalar feeds the #42796 "prompts per session" per-week cohort mean. Severity is always OK.
+- **Both new collectors are enabled by default.** `collectors.enabled` now ships as `["read_edit_ratio", "stop_phrase", "reasoning_loop", "thinking", "prompts"]` so cohort reports surface the #42796 signals out of the box. Each has its own `[collectors.thinking]` / `[collectors.prompts]` config section with an `experimental` flag.
+- **`codevigil report --pivot-date YYYY-MM-DD`** splits the corpus into `before` / `after` buckets (after-bucket inclusive) and emits a Before/After delta table. Incompatible with `--group-by` and `--compare-periods`.
+- **`codevigil report --experimental-correlations`** appends a Pearson correlation matrix across per-session metrics to the cohort report. Pairs below `MIN_PAIRS=30` are dropped; zero-variance columns are skipped. Surfaces with an unavoidable "exploratory signal, not causal evidence" disclaimer and is marked `[experimental]` in output.
+- **`codevigil report --output-file PATH`** writes the rendered report to an exact file path instead of the computed `<output_dir>/report*.{json,md,txt}` default. Parent directories are created if missing; the path must resolve under `$HOME`. Mutually exclusive with `--output`.
+- **`codevigil report --format csv`** on the cohort path. Emits a flat `dimension_value,metric_name,mean,stdev,n,min,max` schema for notebook consumption. Per-session JSON / Markdown remain unchanged.
+- **Cohort report methodology header** on every `--group-by` report. Shows corpus size, date range, cell count, and the cohort JSON schema version so readers know the data shape before reading the table.
+- **Δ-vs-prior-row annotations** on chronological dimensions (`day`, `week`) for each cell with `n≥5`, plus **threshold highlighting** that renders cells crossing the warn / critical thresholds in bold (critical cells carry a leading asterisk). Direction is per-metric (`parse_health` low-is-bad; `reasoning_loop` / `stop_phrase` high-is-bad).
+- **Cohort column injectors** expose four new metric columns: `blind_edit_rate`, `research_mutation_ratio`, `thinking_visible_ratio` (+ two chars_median companions), and `user_turns`. Column headers are decoupled from collector internals so naming stays self-explanatory.
+- **Claim-discipline renderer gate** (`tests/report/test_claim_discipline.py`). Every public cohort renderer is walked and any output containing banned causal language (`because of`, `due to`, `results in`, `responsible for`, etc.) fails the build. Correlation-not-causation enforced at test time.
+
+### Changed
+
+- **Default watch layout is now the project roll-up.** `codevigil watch` with no flags renders one row per project; pass `--by-session` for the 0.2.x-style per-session blocks. Scripts screen-scraping the watch output must either pin `--by-session` or migrate to the new layout.
+- **`collectors.enabled` default now includes `thinking` and `prompts`.** Users with an explicit `collectors.enabled` in their config file are unaffected — their override wins. Users relying on the default will see two new collector blocks in watch output and two new metric columns in cohort reports after upgrading.
+
+### Fixed
+
+- **Stale cursor seeds on file replacement** (`watcher.py`, `watcher_cache.py`). When a session JSONL was replaced in place (e.g., by Claude Code compaction writing a new file with the same path but a different inode / smaller size), the cursor cache previously seeded the new file from the old byte offset, silently skipping the early events. The cache loader now refuses any seed whose `(inode, size)` fingerprint does not match the current file on disk and falls back to byte 0 with a single-line WARN naming the replaced path. A regression test at `tests/test_watcher_cursor_cache.py` covers the inode-change and shrink-below-offset cases.
+
+### Developer experience
+
+- Large-scale complexity reduction across `cli.py`, `config.py`, `parser.py`, `report/`, `history/`, `analysis/`, `collectors/`, and `renderers/`. No behavioural change — pure extraction of helpers, defaultdict adoption, nesting flattening. `mypy --strict` still clean; every pre-existing test passes unchanged.
+- New integration and unit tests: `tests/test_cli_ingest.py`, `tests/test_processed_session_store.py`, `tests/test_watcher_cursor_cache.py`, `tests/test_watch_resume_collector_state.py`, `tests/test_watcher_timing_instrumentation.py`, `tests/test_watcher_unresolved_timestamp.py`, `tests/test_collector_state_serialization.py`, `tests/test_parser_structural_kinds.py`, `tests/renderers/test_terminal_project_view.py`, `tests/renderers/test_terminal_store_overlay.py`, `tests/cli/test_report_output_file.py`, `tests/cli/test_watch_instant_shutdown.py`.
+
 ## [0.2.1] - 2026-04-15
 
 ### Added
@@ -131,7 +167,8 @@ Initial alpha release. Stdlib-only runtime, Python 3.11+, zero network egress.
 - No `inotify` / `fsevents` integration; the watcher is polling-only.
 - Single-process tick loop. No concurrent rendering or multi-host fan-in.
 
-[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.1...HEAD
+[Unreleased]: https://github.com/Mathews-Tom/codevigil/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/Mathews-Tom/codevigil/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/Mathews-Tom/codevigil/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/Mathews-Tom/codevigil/releases/tag/v0.1.1
