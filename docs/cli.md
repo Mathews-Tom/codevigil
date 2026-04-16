@@ -15,13 +15,14 @@ These apply to every subcommand and must appear before the subcommand name on th
 
 ## Subcommands
 
-| Subcommand                      | Purpose                                                                     |
-| ------------------------------- | --------------------------------------------------------------------------- |
-| [`config check`](#config-check) | Resolve the effective config and print each value with its source.          |
-| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard.         |
-| [`report`](#report)             | Batch analysis over one or more session files.                              |
-| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                   |
-| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap). |
+| Subcommand                      | Purpose                                                                                         |
+| ------------------------------- | ----------------------------------------------------------------------------------------------- |
+| [`config check`](#config-check) | Resolve the effective config and print each value with its source.                              |
+| [`ingest`](#ingest)             | Cold-ingest every JSONL under `watch.root` into the persistent processed-session store.         |
+| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard. Project roll-up by default. |
+| [`report`](#report)             | Batch analysis over one or more session files (per-session, cohort, period-compare, or pivot).  |
+| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                                       |
+| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap).                     |
 
 ---
 
@@ -68,10 +69,48 @@ CODEVIGIL_WATCH_POLL_INTERVAL=0.5 codevigil config check
 
 ---
 
+## `ingest`
+
+```text
+codevigil ingest [--db PATH] [--force]
+```
+
+Cold-ingest every JSONL session under `watch.root` into the persistent processed-session store (SQLite). Intended to be run once after install so subsequent `codevigil watch` ticks only process newly-appended events on the hot path. If the store is absent at `codevigil watch` start time, the watch command will invoke the ingest flow automatically — running `ingest` explicitly is only required when you want to force a rebuild or when you want deterministic cold-start timings.
+
+### What it does
+
+1. Resolves config and validates that `watch.root` lies under `$HOME`.
+2. Walks `watch.root` for `*.jsonl` files (up to `watch.max_files`).
+3. For each file: parses end-to-end, runs every enabled collector, and writes one row into the processed store containing session id, file id, final byte offset, serialised collector state, and derived metric summary.
+4. Emits a one-line progress report per file and a final summary: files seen, sessions ingested, sessions skipped (already present), bytes processed.
+
+### Flags
+
+| Flag        | Description                                                                                                                       |
+| ----------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| `--db PATH` | Override the processed-session database path. Must resolve under `$HOME`. Defaults to `~/.local/state/codevigil/processed.db`.    |
+| `--force`   | Re-ingest every session, ignoring existing rows. Use after a breaking collector change or when rebuilding the store from scratch. |
+
+### Exit codes
+
+- `0` — every file ingested successfully (or was already present)
+- `1` — one or more files failed to parse; the remaining files still ingested
+- `2` — critical config error or path scope violation
+
+### Examples
+
+```bash
+codevigil ingest
+codevigil ingest --force
+codevigil ingest --db /tmp/codevigil-bench.db
+```
+
+---
+
 ## `watch`
 
 ```text
-codevigil watch
+codevigil watch [--by-session]
 ```
 
 Starts the live tick loop. Polls `watch.root` at `watch.poll_interval`, parses new events, runs every enabled collector, and renders a frame to the terminal at `watch.tick_interval`.
@@ -93,18 +132,33 @@ Starts the live tick loop. Polls `watch.root` at `watch.poll_interval`, parses n
 
 ### Output
 
-Multi-session terminal dashboard. Most-recently-active sessions appear first. See [getting-started.md](getting-started.md) for a fully annotated example frame.
+0.3.0 introduces two display modes:
 
-The dashboard renders at most `watch.display_limit` session blocks per frame (default 20), ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count and reminds you how to raise the limit.
+- **`project` (default)** — one row per Claude Code project, rolling up every active session in that project into the fleet-worst severity, an active session count, and an aggregate metric summary. At most `watch.display_project_limit` rows per frame (default 10).
+- **`session`** — the 0.2.x one-block-per-session layout. At most `watch.display_limit` blocks per frame (default 20). Blocks are ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count and reminds you how to raise the limit.
+
+Set `watch.display_mode` in config to switch globally, or pass the `--by-session` CLI flag to flip to session mode for a single invocation. See [getting-started.md](getting-started.md) for a fully annotated example frame.
+
+The watcher seeds each polled file from the persistent cursor cache on startup (unless `watch.cursor_cache_enabled = false`) so restarts do not re-parse JSONL from byte 0. Collector state (rolling windows, burst counters) is restored verbatim from the processed-session store. If the store is absent, the watcher cold-ingests every file on first tick before entering the hot loop.
+
+### Flags
+
+| Flag           | Description                                                                                                                                                         |
+| -------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--by-session` | Render one block per session (the 0.2.x layout) instead of the default project roll-up. Equivalent to setting `watch.display_mode = "session"` for this invocation. |
 
 ### Relevant config keys
 
-| Key                   | Default | Description |
-| --------------------- | ------- | ----------- |
-| `watch.root`          | `~/.claude/projects` | Directory to watch for session JSONL files. |
-| `watch.poll_interval` | `2.0`   | Seconds between filesystem polls. |
-| `watch.tick_interval` | `1.0`   | Seconds between terminal frames. |
-| `watch.display_limit` | `20`    | Maximum session blocks rendered per frame. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`. |
+| Key                           | Default                    | Description                                                                                                        |
+| ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `watch.root`                  | `~/.claude/projects`       | Directory to watch for session JSONL files.                                                                        |
+| `watch.poll_interval`         | `2.0`                      | Seconds between filesystem polls.                                                                                  |
+| `watch.tick_interval`         | `1.0`                      | Seconds between terminal frames.                                                                                   |
+| `watch.display_mode`          | `project`                  | `project` (roll-up) or `session` (per-session blocks). CLI `--by-session` overrides.                               |
+| `watch.display_limit`         | `20`                       | Max session blocks rendered per frame in `session` mode. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`.  |
+| `watch.display_project_limit` | `10`                       | Max project rows rendered per frame in `project` mode.                                                             |
+| `watch.cursor_cache_enabled`  | `true`                     | Seed each watched file from its last saved byte offset on startup. Disable for reproducible cold-start benchmarks. |
+| `watch.cursor_cache_dir`      | `~/.local/state/codevigil` | Directory that holds the persistent cursor cache.                                                                  |
 
 ### Exit codes
 
@@ -116,9 +170,10 @@ The dashboard renders at most `watch.display_limit` session blocks per frame (de
 
 ```bash
 codevigil watch
+codevigil watch --by-session
 codevigil --explain watch
 CODEVIGIL_WATCH_POLL_INTERVAL=1.0 codevigil watch
-CODEVIGIL_WATCH_DISPLAY_LIMIT=50 codevigil watch
+CODEVIGIL_WATCH_DISPLAY_LIMIT=50 codevigil watch --by-session
 codevigil --config ./local.toml watch
 ```
 
@@ -128,9 +183,12 @@ codevigil --config ./local.toml watch
 
 ```text
 codevigil report PATH [--from YYYY-MM-DD] [--to YYYY-MM-DD]
-                      [--format {json,markdown}] [--output DIR]
+                      [--format {json,markdown,csv}]
+                      [--output DIR | --output-file FILE]
                       [--group-by {day,week,project,model,permission_mode}]
                       [--compare-periods A_START:A_END,B_START:B_END]
+                      [--pivot-date YYYY-MM-DD]
+                      [--experimental-correlations]
 ```
 
 Batch analysis over one or more session files.
@@ -149,14 +207,17 @@ With `--group-by` or `--compare-periods`, produces a Markdown cohort report inst
 
 ### Flags
 
-| Flag                       | Description                                                                     |
-| -------------------------- | ------------------------------------------------------------------------------- |
-| `--from YYYY-MM-DD`        | Filter at the **event** level: discard individual events whose timestamp is strictly before this date. Sessions that straddle this boundary contribute only their in-window events; `started_at` is clamped to the first in-window event. Sessions with zero in-window events are omitted entirely. |
-| `--to YYYY-MM-DD`          | Filter at the **event** level: discard individual events whose timestamp is strictly after this date. Sessions that straddle this boundary contribute only their in-window events; `ended_at` is clamped to the last in-window event. Sessions with zero in-window events are omitted entirely. |
-| `--format {json,markdown}` | Output format for the per-session report. Default `json`.                       |
-| `--output DIR`             | Override the report output directory. Must resolve under `$HOME`.               |
-| `--group-by DIMENSION`     | Produce a cohort trend table. See below. Incompatible with `--compare-periods`. |
-| `--compare-periods RANGES` | Compare two date ranges. See below. Incompatible with `--group-by`.             |
+| Flag                           | Description                                                                                                                                                                                                                                                                                         |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------- | --- | ------------------------- |
+| `--from YYYY-MM-DD`            | Filter at the **event** level: discard individual events whose timestamp is strictly before this date. Sessions that straddle this boundary contribute only their in-window events; `started_at` is clamped to the first in-window event. Sessions with zero in-window events are omitted entirely. |
+| `--to YYYY-MM-DD`              | Filter at the **event** level: discard individual events whose timestamp is strictly after this date. Sessions that straddle this boundary contribute only their in-window events; `ended_at` is clamped to the last in-window event. Sessions with zero in-window events are omitted entirely.     |
+| `--format {json,markdown,csv}` | Output format. Per-session path supports `json                                                                                                                                                                                                                                                      | markdown`(default`json`). Cohort path (`--group-by`) supports `markdown | csv | json`(default`markdown`). |
+| `--output DIR`                 | Override the report output directory. Must resolve under `$HOME`. Mutually exclusive with `--output-file`.                                                                                                                                                                                          |
+| `--output-file FILE`           | Write to an exact file path instead of the computed default. Parent directories are created if missing. Must resolve under `$HOME`. Mutually exclusive with `--output`.                                                                                                                             |
+| `--group-by DIMENSION`         | Produce a cohort trend table. See below. Incompatible with `--compare-periods` and `--pivot-date`.                                                                                                                                                                                                  |
+| `--compare-periods RANGES`     | Compare two date ranges. See below. Incompatible with `--group-by` and `--pivot-date`.                                                                                                                                                                                                              |
+| `--pivot-date YYYY-MM-DD`      | Split the corpus into `before` (strictly before the date) and `after` (on or after) buckets and emit a Before/After delta table. Incompatible with `--group-by` and `--compare-periods`.                                                                                                            |
+| `--experimental-correlations`  | Append a Pearson correlation matrix across per-session metrics to the cohort report. Pairs below `n=30` are dropped; zero-variance columns are skipped. Surfaces with an "exploratory signal, not causal evidence" disclaimer and is marked `[experimental]`.                                       |
 
 > **Note on `--from`/`--to` granularity.** These flags operate at the individual event timestamp, not at the session boundary. A session that runs from 23:50 to 00:10 across midnight will appear in both `--to 2026-01-01` (pre-midnight events only) and `--from 2026-01-02` (post-midnight events only) reports, each with a clamped `started_at`/`ended_at` that reflects the in-window portion. This behaviour differs from prior versions, which dropped or kept entire sessions based on the session's first event timestamp. Reports generated with narrow date windows over sessions that straddle those windows will show different (lower) event counts and metric values than reports with no date filter.
 
@@ -428,14 +489,14 @@ Lists all stored sessions in a rich formatted table. Reads all sessions from the
 
 **Flags:**
 
-| Flag                        | Description                                                                |
-| --------------------------- | -------------------------------------------------------------------------- |
-| `--project NAME`            | Filter by project name or project hash.                                    |
-| `--since YYYY-MM-DD`        | Include sessions whose `started_at` is on or after this date (inclusive).  |
-| `--until YYYY-MM-DD`        | Include sessions whose `started_at` is on or before this date (inclusive). |
-| `--severity {ok,warn,crit}` | Filter by worst-metric severity across all metrics in the session.         |
-| `--model MODEL`             | Filter by model identifier (exact match).                                  |
-| `--permission-mode MODE`    | Filter by permission mode (exact match).                                   |
+| Flag                        | Description                                                                                                                                                                  |
+| --------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--project NAME`            | Filter by project name or project hash.                                                                                                                                      |
+| `--since YYYY-MM-DD`        | Include sessions whose `started_at` is on or after this date (inclusive).                                                                                                    |
+| `--until YYYY-MM-DD`        | Include sessions whose `started_at` is on or before this date (inclusive).                                                                                                   |
+| `--severity {ok,warn,crit}` | Filter by worst-metric severity across all metrics in the session.                                                                                                           |
+| `--model MODEL`             | Filter by model identifier (exact match).                                                                                                                                    |
+| `--permission-mode MODE`    | Filter by permission mode (exact match).                                                                                                                                     |
 | `--task-type NAME`          | Filter by classifier-derived task type label (exact match, e.g. `debug_loop`, `exploration`). Sessions with no task type are excluded. Requires `classifier.enabled = true`. |
 
 **task_type column visibility.** The `task_type` column is hidden entirely — not just empty — when no session in the result set has a task type value. This preserves backward compatibility with history stores created before the classifier was enabled. The column header reads `task_type [experimental]` when the classifier is in experimental mode (the default).
@@ -523,8 +584,8 @@ Renders a metric x severity matrix for a single session using `rich.table.Table`
 
 **Flags:**
 
-| Flag                    | Description                                                                               |
-| ----------------------- | ----------------------------------------------------------------------------------------- |
+| Flag                          | Description                                                                                                                                                                                                                                            |
+| ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `--axis {severity,task_type}` | Heatmap axis. Default `severity` renders the single-session metric x severity matrix. `--axis task_type` [experimental] cross-tabulates metric means across all stored sessions grouped by classifier task type. Requires `classifier.enabled = true`. |
 
 **`--axis task_type` details.** Groups all sessions in the store by their `session_task_type` label. Sessions with no task type appear under `(unclassified)`. Each cell shows the mean metric value across sessions with that task type. The table title carries an `[experimental]` badge. Exits 1 with a descriptive error if the classifier is disabled.

@@ -1,13 +1,17 @@
 # Collectors
 
-A collector consumes parsed `Event`s, maintains a small amount of internal state, and emits a single `MetricSnapshot` per `snapshot()` call. v0.1 ships four collectors. Three are user-facing and configurable via the `enabled` list; the fourth is the always-on integrity gate.
+A collector consumes parsed `Event`s, maintains a small amount of internal state, and emits a single `MetricSnapshot` per `snapshot()` call. As of 0.3.0 codevigil ships six collectors. Five are user-facing and configurable via the `enabled` list; the sixth is the always-on integrity gate.
 
-| Collector                             | What it measures                                                               | Always on?               |
-| ------------------------------------- | ------------------------------------------------------------------------------ | ------------------------ |
-| [`read_edit_ratio`](#read_edit_ratio) | Reads vs. mutations, blind-edit detection, file-tracking confidence            | No (default enabled)     |
-| [`stop_phrase`](#stop_phrase)         | Hits against four phrase categories that flag stalled progress                 | No (default enabled)     |
-| [`reasoning_loop`](#reasoning_loop)   | Self-correction phrase rate per 1000 tool calls plus longest consecutive burst | No (default enabled)     |
-| [`parse_health`](#parse_health)       | Fraction of input lines successfully parsed in a 50-line drift window          | **Yes — un-disableable** |
+| Collector                             | What it measures                                                               | Severity gated?          | Always on?               |
+| ------------------------------------- | ------------------------------------------------------------------------------ | ------------------------ | ------------------------ |
+| [`read_edit_ratio`](#read_edit_ratio) | Reads vs. mutations, blind-edit detection, file-tracking confidence            | Yes                      | No (default enabled)     |
+| [`stop_phrase`](#stop_phrase)         | Hits against four phrase categories that flag stalled progress                 | Yes                      | No (default enabled)     |
+| [`reasoning_loop`](#reasoning_loop)   | Self-correction phrase rate per 1000 tool calls plus longest consecutive burst | Yes                      | No (default enabled)     |
+| [`thinking`](#thinking)               | Visible-vs-redacted thinking-block ratio plus median character lengths         | No — descriptive counter | No (default enabled)     |
+| [`prompts`](#prompts)                 | Cumulative user-turn count per session                                         | No — descriptive counter | No (default enabled)     |
+| [`parse_health`](#parse_health)       | Fraction of input lines successfully parsed in a 50-line drift window          | Yes                      | **Yes — un-disableable** |
+
+`thinking` and `prompts` are descriptive counters added in 0.3.0 for cohort trend analysis at parity with anthropics/claude-code#42796. They have no tunable thresholds; severity is always OK by design. They exist to feed the cohort reducer, not to alarm on a single session.
 
 Each collector is documented below with: what it measures, the metric shape, threshold semantics, severity rules, and what to do when it flips to WARN or CRITICAL.
 
@@ -189,6 +193,59 @@ A modest reasoning-loop rate is healthy — the model is checking its own work. 
 ### Shared matcher implementation
 
 `reasoning_loop` and `stop_phrase` share a single text-matching helper module (`codevigil/collectors/_text_match.py`) so both collectors get the same word-boundary semantics, the same Aho–Corasick escalation, and the same `force_mode` test hook. Phrase-matching behaviour stays consistent across both collectors by construction.
+
+---
+
+## `thinking`
+
+**Signal**: how much of the assistant's thinking is visible vs. redacted, and how deep the thinking runs when it is visible. Headline signal for the anthropics/claude-code#42796 thinking-depth-decline cohort analysis.
+
+### What it tracks
+
+Every `EventKind.THINKING` event the parser emits. For each block the collector records whether it arrived visible (non-redacted), the character length of visible content, and the character length of the signature block (used as a proxy for redacted thinking depth per the #42796 `r = 0.971` correlation).
+
+### Metrics emitted
+
+The primary scalar is `visible_ratio = visible_blocks / max(thinking_blocks, 1)` — the fraction of thinking blocks that arrived un-redacted. The detail dict carries:
+
+- `thinking_blocks` — total thinking events observed
+- `visible_blocks` — events whose `redacted` flag was false
+- `visible_chars_median` — median character length of visible blocks (`None` when no visible blocks observed)
+- `signature_chars_median` — median signature length across all blocks (`None` when no signatures present)
+- `experimental` — mirror of the config flag
+
+### Severity
+
+**Always OK.** The collector is a descriptive counter. There is no validated threshold for "too little thinking" and inventing one would violate the project's claim discipline. The cohort reducer and renderer surface the trend.
+
+### Cohort columns
+
+`codevigil report --group-by` exposes three decoupled column headers: `thinking_visible_ratio` (primary scalar), `thinking_visible_chars_median`, and `thinking_signature_chars_median`. Column naming stays self-explanatory so readers of the cohort table do not have to cross-reference collector internals.
+
+---
+
+## `prompts`
+
+**Signal**: how many distinct user turns the session contained. Feeds the #42796 "prompts per session" per-week cohort mean (35.9 → 27.9 in the reference issue).
+
+### What it tracks
+
+Every `EventKind.USER_MESSAGE` event the parser emits. No payload inspection — the collector is a simple counter.
+
+### Metrics emitted
+
+The primary scalar is the cumulative user-turn count. The detail dict carries:
+
+- `user_turns` — mirror of the primary scalar, for self-documentation
+- `experimental` — mirror of the config flag
+
+### Severity
+
+**Always OK.** Descriptive counter, no threshold, no alarm.
+
+### Cohort columns
+
+`codevigil report --group-by` exposes the column as `user_turns` (rebranded from the collector scalar name so downstream readers do not have to understand that `prompts` is the collector and `user_turns` is the metric). Sessions with zero user turns are dropped from the column rather than being counted as zero.
 
 ---
 
