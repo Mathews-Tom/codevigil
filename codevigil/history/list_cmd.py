@@ -42,6 +42,7 @@ from codevigil.history.filters import (
     short_id,
     top_metrics_summary,
 )
+from codevigil.ui.progress import ProgressReporter
 
 _SEV_STYLE: dict[str, str] = {"ok": "green", "warn": "yellow", "crit": "red"}
 
@@ -62,6 +63,7 @@ def run_list(
     classifier_experimental: bool = True,
     thresholds: dict[str, tuple[float, float]] | None = None,
     out: Any = None,
+    reporter: ProgressReporter | None = None,
 ) -> int:
     """Enumerate the store, apply filters, render rich table.
 
@@ -92,7 +94,15 @@ def run_list(
         out = sys.stdout
 
     store = SessionStore(base_dir=store_dir)
+    if reporter is not None:
+        reporter.update(phase="scanning store", message="loading stored sessions")
     all_reports = store.list_reports()
+    if reporter is not None:
+        reporter.set_total(len(all_reports))
+        reporter.update(
+            phase="filtering",
+            message=f"{len(all_reports)} stored sessions",
+        )
 
     filtered = apply_filters(
         all_reports,
@@ -105,6 +115,11 @@ def run_list(
         task_type=task_type,
         thresholds=thresholds,
     )
+    if reporter is not None:
+        reporter.update(
+            phase="rendering",
+            message=f"{len(filtered)} matching sessions",
+        )
 
     console = rich.console.Console(file=out, highlight=False)
     console.print(_build_table(filtered, classifier_experimental=classifier_experimental))

@@ -92,3 +92,34 @@ def test_watch_handles_aggregator_error_without_crash(
     assert "codevigil shutdown" in capsys.readouterr().out
     # Loop runs one tick, then observes the pre-flipped flag and exits.
     assert calls == [1]
+
+
+def test_run_one_tick_reports_watch_phases(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    phases: list[str] = []
+
+    class _Aggregator:
+        def tick(self) -> Any:
+            return iter(())
+
+    class _Renderer:
+        def begin_tick(self) -> None:
+            return None
+
+        def end_tick(self) -> None:
+            return None
+
+        def render(self, snapshots: list[Any], meta: Any) -> None:
+            return None
+
+        def render_error(self, err: Exception, meta: Any) -> None:
+            raise AssertionError(f"unexpected error: {err}")
+
+    monkeypatch.setattr(cli_module, "_watch_phase_hook", phases.append)
+    try:
+        assert cli_module._run_one_tick(_Aggregator(), _Renderer(), explain=False) is True
+    finally:
+        monkeypatch.setattr(cli_module, "_watch_phase_hook", None)
+
+    assert phases == ["scanning", "aggregating", "rendering"]

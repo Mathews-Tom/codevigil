@@ -38,7 +38,7 @@ import io
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import date
-from typing import Any
+from typing import Any, Literal
 
 import rich.console
 import rich.panel
@@ -60,7 +60,17 @@ from codevigil.config import CONFIG_DEFAULTS
 # Banned causal words — tested by the banned-word guard test.
 # These words must NEVER appear in any rendered output from this module.
 # ---------------------------------------------------------------------------
-BANNED_CAUSAL_WORDS: frozenset[str] = frozenset({"caused", "drove", "led to"})
+BANNED_CAUSAL_WORDS: frozenset[str] = frozenset(
+    {
+        "caused",
+        "drove",
+        "led to",
+        "because of",
+        "due to",
+        "results in",
+        "responsible for",
+    }
+)
 
 # Metric display names for the appendix catalog.
 _METRIC_DISPLAY_NAMES: dict[str, str] = {
@@ -69,6 +79,13 @@ _METRIC_DISPLAY_NAMES: dict[str, str] = {
     "reasoning_loop": "Reasoning Loop Rate",
     "parse_health": "Parse Health",
     "write_precision": "Write Precision",
+    "blind_edit_rate": "Blind Edit Rate",
+    "thinking_visible_ratio": "Thinking Visible %",
+    "thinking_visible_chars_median": "Thinking Median Chars",
+    "thinking_signature_chars_median": "Signature Median Chars",
+    "user_turns": "Prompts/Session",
+    "research_mutation_ratio": "Research:Mutation",
+    "frustration_rate": "Frustration Rate",
 }
 
 # Per-metric definitions for the appendix behavioral catalog.
@@ -102,6 +119,47 @@ _METRIC_DEFINITIONS: dict[str, str] = {
         "means all mutations were full-file writes; 0.0 means all mutations were "
         "surgical edits. Directly comparable to §4 of the target retrospective "
         "analysis. Null when no write or edit tool calls were observed."
+    ),
+    "blind_edit_rate": (
+        "Fraction of mutation tool calls (Edit/Write) that targeted a file the "
+        "session had not previously read or grepped within the blind-edit window. "
+        "Per-file tracked, so unrelated mutations between a Read and its follow-up "
+        "Edit do not pollute the count. Suppressed when tracking confidence "
+        "(fraction of mutations carrying a file_path payload) falls below the "
+        "configured floor. Comparable to issue #42796 §A 'edits without prior read'."
+    ),
+    "thinking_visible_ratio": (
+        "Fraction of thinking blocks that arrived with inline text rather than "
+        "as a redacted signature-only stub. A value of 1.0 means every thinking "
+        "block was visible; 0.0 means every block was redacted. Tracks the "
+        "redact-thinking rollout described in issue #42796 §1."
+    ),
+    "thinking_visible_chars_median": (
+        "Median character length of visible (non-redacted) thinking blocks within "
+        "a session. Comparable to the issue #42796 §2 'thinking depth decline' "
+        "headline figure (~2,200 → ~600 chars). Null when no visible blocks "
+        "were observed."
+    ),
+    "thinking_signature_chars_median": (
+        "Median character length of thinking-block signatures across all blocks. "
+        "Per issue #42796, signature length correlates with redacted thinking "
+        "depth (Pearson r ≈ 0.971), so this serves as a proxy for the depth of "
+        "thinking the model performed even when the inline content was redacted."
+    ),
+    "user_turns": (
+        "Count of user-message turns observed in the session. Comparable to the "
+        "issue #42796 'prompts per session' figure (35.9 → 27.9)."
+    ),
+    "research_mutation_ratio": (
+        "Ratio of (read + research) tool calls to mutation tool calls within the "
+        "rolling window. Higher values mean more upfront investigation relative "
+        "to file modification."
+    ),
+    "frustration_rate": (
+        "Rate of user-message frustration phrases per 1,000 user turns. Counts "
+        "phrases like 'you're not listening', 'stop', and explicit corrections "
+        "issued back to the assistant. Lexicon is configurable via "
+        "collectors.frustration.custom_phrases."
     ),
 }
 
@@ -226,11 +284,36 @@ def render_group_by_report(
     cohort = reduce_by(filtered, dimension)
     lines: list[str] = []
 
-    _render_trend_table(lines, cohort)
+    _render_methodology_header(lines, cohort, reports=filtered, dimension=dimension)
+    _render_trend_table(lines, cohort, cfg=effective_cfg)
     _render_methodology_group_by(lines, cohort, reports=filtered, dimension=dimension)
     _render_appendix(lines, cohort=cohort, cfg=effective_cfg)
 
     return "\n".join(lines) + "\n"
+
+
+def _render_methodology_header(
+    lines: list[str],
+    cohort: CohortSlice,
+    *,
+    reports: list[SessionReport],
+    dimension: str,
+) -> None:
+    """Top-of-report header block: corpus size, date range, schema version.
+
+    Mirrors the issue #42796 methodology lead-in: state the data shape
+    up front so the reader knows what they are looking at before the
+    table. Strictly descriptive — no causal language, no claims about
+    quality.
+    """
+    date_range = _compute_date_range(reports)
+    lines.append(f"# Cohort Trend Report — by {dimension}")
+    lines.append("")
+    lines.append(
+        f"**Corpus:** {len(reports)} session(s) — **Range:** {date_range} — "
+        f"**Cells:** {len(cohort.cells)} — **Schema:** v{CURRENT_SCHEMA_VERSION}"
+    )
+    lines.append("")
 
 
 # ---------------------------------------------------------------------------
@@ -308,36 +391,48 @@ def render_compare_periods_report(
 # ---------------------------------------------------------------------------
 
 
-def _render_trend_table(lines: list[str], cohort: CohortSlice) -> None:
-    """Render the cohort trend table as a Markdown table."""
-    lines.append(f"# Cohort Trend Report — by {cohort.dimension}")
-    lines.append("")
+def _render_trend_table(
+    lines: list[str],
+    cohort: CohortSlice,
+    *,
+    cfg: dict[str, Any] | None = None,
+) -> None:
+    """Render the cohort trend table as a Markdown table.
 
+    For chronological dimensions (``day``/``week``) the formatter
+    annotates each cell with ``[Δ±0.05]`` showing the change from the
+    prior row's mean for the same metric. Threshold-crossing cells are
+    bolded (warn) or asterisked (critical) based on the resolved config.
+    """
     if not cohort.cells:
         lines.append("_No data available for the selected period._")
         lines.append("")
         return
 
-    # Collect all dimension values and metric names from cells.
+    chronological = cohort.dimension in {"day", "week"}
+    effective_cfg = cfg if cfg is not None else CONFIG_DEFAULTS
+    thresholds = _build_threshold_index(effective_cfg)
+
     dim_values: list[str] = sorted({c.dimension_value for c in cohort.cells})
     metric_names: list[str] = sorted({c.metric_name for c in cohort.cells})
 
-    # Index cells by (dimension_value, metric_name) for lookup.
     cell_index: dict[tuple[str, str], CohortCell] = {
         (c.dimension_value, c.metric_name): c for c in cohort.cells
     }
 
-    # Table header.
     header_cols = [cohort.dimension] + [_col_header(m) for m in metric_names]
     lines.append("| " + " | ".join(header_cols) + " |")
     lines.append("| " + " | ".join("---" for _ in header_cols) + " |")
 
-    # One row per dimension value.
+    prior_means: dict[str, float] = {}
     for dim_val in dim_values:
         row: list[str] = [dim_val]
         for metric in metric_names:
             cell = cell_index.get((dim_val, metric))
-            row.append(_format_cell(cell))
+            prior = prior_means.get(metric) if chronological else None
+            row.append(_format_cell(cell, prior_mean=prior, thresholds=thresholds.get(metric)))
+            if cell is not None and cell.n >= 5:
+                prior_means[metric] = cell.mean
         lines.append("| " + " | ".join(row) + " |")
 
     lines.append("")
@@ -349,8 +444,28 @@ def _col_header(metric_name: str) -> str:
     return display
 
 
-def _format_cell(cell: CohortCell | None) -> str:
-    """Format a cohort cell as ``mean ± stdev (n)`` or the guard sentinel."""
+def _format_cell(
+    cell: CohortCell | None,
+    *,
+    prior_mean: float | None = None,
+    thresholds: tuple[float | None, float | None, _ThresholdDirection] | None = None,
+) -> str:
+    """Format a cohort cell as ``mean ± stdev (n)`` plus optional Δ and severity.
+
+    Parameters:
+        cell: The cohort cell, or ``None`` for a missing intersection.
+        prior_mean: The previous chronological row's mean for the same
+            metric. When supplied and non-None, an inline ``[Δ±X.XX]``
+            annotation is appended.
+        thresholds: ``(warn, critical, direction)`` tuple where ``direction``
+            is ``"high"`` (cross when value >= threshold) or ``"low"`` (cross
+            when value < threshold). Cells crossing warn are bolded,
+            crossing critical are bolded with a leading asterisk.
+
+    Cells with ``n < 5`` always render as the guard sentinel and never
+    receive delta or threshold decoration — drawing attention to a
+    sample-too-small cell would defeat the privacy guard.
+    """
     if cell is None:  # pragma: no cover
         return "—"
     try:
@@ -358,10 +473,92 @@ def _format_cell(cell: CohortCell | None) -> str:
     except CellTooSmall as exc:
         return exc.sentinel
     if cell.n == 1:  # pragma: no cover
-        # Single observation: no meaningful stdev (guard normally blocks n<5,
-        # so this branch fires only when MIN_CELL_N is set to 1 in config).
-        return f"{cell.mean:.2f} (n=1)"
-    return f"{cell.mean:.2f} ± {cell.stdev:.2f} (n={cell.n})"
+        base = f"{cell.mean:.2f} (n=1)"
+    else:
+        base = f"{cell.mean:.2f} ± {cell.stdev:.2f} (n={cell.n})"
+
+    if prior_mean is not None:
+        delta = cell.mean - prior_mean
+        sign = "+" if delta >= 0 else ""
+        base += f" [Δ{sign}{delta:.2f}]"
+
+    if thresholds is not None:
+        warn, critical, direction = thresholds
+        severity = _classify_threshold(cell.mean, warn, critical, direction)
+        if severity == "critical":
+            base = f"**\\*{base}**"
+        elif severity == "warn":
+            base = f"**{base}**"
+
+    return base
+
+
+_ThresholdDirection = Literal["high", "low"]
+_Severity = Literal["critical", "warn", "ok"]
+
+
+def _classify_threshold(
+    value: float,
+    warn: float | None,
+    critical: float | None,
+    direction: _ThresholdDirection,
+) -> _Severity:
+    """Return ``"critical"``, ``"warn"``, or ``"ok"`` for a metric value.
+
+    ``direction="high"`` flags values at or above the threshold (used by
+    metrics where larger is worse, e.g. reasoning_loop). ``direction="low"``
+    flags values strictly below the threshold (used by parse_health where
+    smaller is worse).
+    """
+    if direction == "high":
+        if critical is not None and value >= critical:
+            return "critical"
+        if warn is not None and value >= warn:
+            return "warn"
+        return "ok"
+    # direction == "low"
+    if critical is not None and value < critical:
+        return "critical"
+    if warn is not None and value < warn:
+        return "warn"
+    return "ok"
+
+
+# Per-metric threshold orientation. Metrics not in this map receive no
+# threshold decoration in the rendered table — their thresholds may exist
+# in config but are ambiguous in direction (e.g. read_edit_ratio is a
+# 'low is bad' metric in the loader's severity model, but the cohort
+# table presents the raw mean which is not directly thresholded).
+_THRESHOLD_DIRECTIONS: dict[str, _ThresholdDirection] = {
+    "parse_health": "low",
+    "reasoning_loop": "high",
+    "stop_phrase": "high",
+}
+
+
+def _build_threshold_index(
+    cfg: dict[str, Any],
+) -> dict[str, tuple[float | None, float | None, _ThresholdDirection]]:
+    """Pull warn/critical thresholds out of the resolved config.
+
+    Returns a mapping from metric name to ``(warn, critical, direction)``.
+    Only metrics with a registered direction in
+    :data:`_THRESHOLD_DIRECTIONS` are included.
+    """
+    out: dict[str, tuple[float | None, float | None, _ThresholdDirection]] = {}
+    collectors_cfg = cfg.get("collectors", {})
+    for metric, direction in _THRESHOLD_DIRECTIONS.items():
+        section = collectors_cfg.get(metric)
+        if not isinstance(section, dict):
+            continue
+        warn_raw = section.get("warn_threshold")
+        crit_raw = section.get("critical_threshold")
+        warn = float(warn_raw) if isinstance(warn_raw, (int, float)) else None
+        critical = float(crit_raw) if isinstance(crit_raw, (int, float)) else None
+        if warn is None and critical is None:
+            continue
+        out[metric] = (warn, critical, direction)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -710,9 +907,131 @@ def _n_bucket(n: int) -> str:
     return "25+"
 
 
+def render_correlations_section(reports: list[SessionReport]) -> str:
+    """Render the experimental correlation appendix as Markdown.
+
+    Calls :func:`~codevigil.analysis.correlations.compute_correlations`
+    and emits a sorted table of metric pairs. Always prefixed with the
+    experimental disclaimer so the section cannot be quoted out of
+    context as a quality claim.
+    """
+    from codevigil.analysis.correlations import MIN_PAIRS, compute_correlations
+
+    correlations = compute_correlations(reports)
+    lines: list[str] = []
+    lines.append("### Experimental Correlations")
+    lines.append("")
+    lines.append(
+        "**Experimental — exploratory signal only.** Pearson correlation across "
+        "per-session metric columns. Pearson assumes normality; per-session "
+        "metric values are heteroscedastic so these numbers are not statistically "
+        "calibrated. Pairs with fewer than "
+        f"{MIN_PAIRS} joint observations are omitted. A high correlation "
+        "coincides with co-movement in the data — it is not causal evidence."
+    )
+    lines.append("")
+    if not correlations:
+        lines.append("_No metric pairs met the minimum sample threshold._")
+        lines.append("")
+        return "\n".join(lines)
+    lines.append("| Metric A | Metric B | Pearson r | n |")
+    lines.append("| --- | --- | --- | --- |")
+    for mc in correlations:
+        lines.append(f"| {mc.metric_a} | {mc.metric_b} | {mc.r:+.3f} | {mc.n} |")
+    lines.append("")
+    return "\n".join(lines)
+
+
+def render_group_by_csv(cohort: CohortSlice) -> str:
+    """Render a cohort slice as CSV.
+
+    Schema: ``dimension_value,metric_name,mean,stdev,n,min,max``. One
+    row per cell. ``n<5`` cells are emitted with the raw mean/stdev so
+    downstream tooling can apply its own privacy guard if desired —
+    suppressing them here would silently drop data the user explicitly
+    asked for in machine-readable form.
+    """
+    import csv
+    import io
+
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow([cohort.dimension, "metric_name", "mean", "stdev", "n", "min", "max"])
+    for cell in cohort.cells:
+        writer.writerow(
+            [
+                cell.dimension_value,
+                cell.metric_name,
+                f"{cell.mean:.6f}",
+                f"{cell.stdev:.6f}",
+                cell.n,
+                f"{cell.min_value:.6f}",
+                f"{cell.max_value:.6f}",
+            ]
+        )
+    return buf.getvalue()
+
+
+def render_group_by_json(
+    cohort: CohortSlice,
+    *,
+    reports: list[SessionReport] | None = None,
+) -> str:
+    """Render a cohort slice as a versioned JSON document.
+
+    The JSON shape is intended for downstream notebook consumption:
+
+    .. code-block:: json
+
+        {
+          "schema_version": 1,
+          "dimension": "week",
+          "session_count": 7549,
+          "excluded_null_count": 0,
+          "date_range": "2026-01-09..2026-04-15",
+          "cells": [
+            {
+              "dimension_value": "2026-W14",
+              "metric_name": "thinking_visible_chars_median",
+              "mean": 317.61,
+              "stdev": 201.65,
+              "n": 37,
+              "min": 50.0,
+              "max": 920.0
+            }
+          ]
+        }
+    """
+    import json
+
+    payload: dict[str, Any] = {
+        "schema_version": 1,
+        "dimension": cohort.dimension,
+        "session_count": cohort.session_count,
+        "excluded_null_count": cohort.excluded_null_count,
+        "date_range": _compute_date_range(reports) if reports else None,
+        "cells": [
+            {
+                "dimension_value": c.dimension_value,
+                "metric_name": c.metric_name,
+                "mean": c.mean,
+                "stdev": c.stdev,
+                "n": c.n,
+                "min": c.min_value,
+                "max": c.max_value,
+            }
+            for c in cohort.cells
+        ],
+    }
+    return json.dumps(payload, indent=2, sort_keys=True) + "\n"
+
+
 __all__ = [
     "BANNED_CAUSAL_WORDS",
     "render_compare_periods_report",
+    "render_correlations_section",
+    "render_group_by_csv",
+    "render_group_by_json",
     "render_group_by_report",
     "render_multi_period",
 ]

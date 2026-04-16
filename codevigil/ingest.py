@@ -40,14 +40,6 @@ from pathlib import Path
 from typing import Any
 
 from rich.console import Console
-from rich.progress import (
-    BarColumn,
-    MofNCompleteColumn,
-    Progress,
-    SpinnerColumn,
-    TextColumn,
-    TimeElapsedColumn,
-)
 
 from codevigil.aggregator import SessionAggregator
 from codevigil.analysis.processed_store import (
@@ -57,6 +49,7 @@ from codevigil.analysis.processed_store import (
 )
 from codevigil.projects import ProjectRegistry
 from codevigil.types import SessionState
+from codevigil.ui.progress import ProgressReporter, progress_reporter
 from codevigil.watcher import SourceEvent, SourceEventKind
 
 _HUGE_LIFECYCLE_SECONDS: int = 10_000_000_000
@@ -242,6 +235,7 @@ def run_ingest(
     config: dict[str, Any],
     console: Console,
     force: bool = False,
+    reporter: ProgressReporter | None = None,
 ) -> IngestResult:
     """Ingest every JSONL file under ``root`` into ``store``.
 
@@ -265,52 +259,53 @@ def run_ingest(
     processed = 0
     skipped = 0
     bytes_read = 0
-
-    progress = Progress(
-        SpinnerColumn(),
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        MofNCompleteColumn(),
-        TextColumn("•"),
-        TimeElapsedColumn(),
-        console=console,
-        transient=False,
+    active_reporter = (
+        reporter if reporter is not None else progress_reporter(total_items=len(files))
     )
-    with progress:
-        task = progress.add_task(
-            f"Ingesting {len(files)} session file(s)",
-            total=len(files),
+    active_reporter.start(
+        phase="walking",
+        total=len(files),
+        message=f"{len(files)} session files",
+        unit="files",
+        target=str(root),
+    )
+    for path in files:
+        stat = _stat_path(path)
+        if stat is None:
+            active_reporter.advance(message="skipped missing file", target=path.name)
+            continue
+        if _should_skip(
+            store,
+            path,
+            stat.st_ino,
+            stat.st_size,
+            stat.st_mtime,
+            force=force,
+        ):
+            skipped += 1
+            active_reporter.advance(message="skipped unchanged file", target=path.name)
+            continue
+
+        active_reporter.update(phase="ingesting", message="dispatching file", target=path.name)
+        file_bytes = _feed_file(aggregator, path, stat)
+        bytes_read += file_bytes
+        active_reporter.update(phase="persisting", message="writing processed session")
+        record = _snapshot_to_record(aggregator, path, stat, project_registry)
+        if record is not None:
+            store.upsert_session(record)
+            processed += 1
+
+        # Evict the session from the aggregator to bound memory.
+        ctx = aggregator.sessions.get(path.stem)
+        if ctx is not None:
+            ctx.state = SessionState.EVICTED
+            aggregator.sessions.pop(path.stem, None)
+        active_reporter.advance(
+            message="persisted session",
+            bytes_delta=file_bytes,
+            target=path.name,
         )
-        for path in files:
-            stat = _stat_path(path)
-            if stat is None:
-                progress.advance(task)
-                continue
-            if _should_skip(
-                store,
-                path,
-                stat.st_ino,
-                stat.st_size,
-                stat.st_mtime,
-                force=force,
-            ):
-                skipped += 1
-                progress.advance(task)
-                continue
-
-            file_bytes = _feed_file(aggregator, path, stat)
-            bytes_read += file_bytes
-            record = _snapshot_to_record(aggregator, path, stat, project_registry)
-            if record is not None:
-                store.upsert_session(record)
-                processed += 1
-
-            # Evict the session from the aggregator to bound memory.
-            ctx = aggregator.sessions.get(path.stem)
-            if ctx is not None:
-                ctx.state = SessionState.EVICTED
-                aggregator.sessions.pop(path.stem, None)
-            progress.advance(task)
+    active_reporter.finish(message=f"processed={processed} skipped={skipped}")
 
     with contextlib.suppress(BaseException):  # pragma: no cover - defensive
         aggregator.close()
