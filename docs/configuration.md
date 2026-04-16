@@ -26,16 +26,20 @@ The default config tree has these top-level sections:
 
 ## `[watch]`
 
-| Key                     | Type    | Default              | Description                                                                                                                                                                            |
-| ----------------------- | ------- | -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `root`                  | `str`   | `~/.claude/projects` | Directory to walk for session JSONL files. Must resolve under `$HOME`.                                                                                                                 |
-| `poll_interval`         | `float` | `2.0`                | Seconds between filesystem polls. Range: `[0.05, 3600]`.                                                                                                                               |
-| `tick_interval`         | `float` | `1.0`                | Seconds between aggregator ticks (and terminal frames). Range: `[0.05, 3600]`.                                                                                                         |
-| `max_files`             | `int`   | `2000`               | Cap on the number of session files walked per poll. Overflow logs one WARN per run and processes the first N deterministically. Range: `[1, 1_000_000]`.                               |
-| `large_file_warn_bytes` | `int`   | `10 * 1024 * 1024`   | Per-poll growth above this triggers a single WARN per file per run. Range: `[1024, 10**12]`.                                                                                           |
-| `stale_after_seconds`   | `int`   | `300`                | A session silent for this long transitions to STALE. Collector state is preserved. Range: `[1, 86400]`.                                                                                |
-| `evict_after_seconds`   | `int`   | `2100`               | A session silent for this long is EVICTED. `reset()` is called on every collector and the cursor is dropped. Must be strictly greater than `stale_after_seconds`. Range: `[1, 86400]`. |
-| `display_limit`         | `int`   | `20`                 | Maximum number of session blocks rendered per frame in `watch` mode. Sessions are ranked by severity then recency; only the top `display_limit` entries are shown. A footer line reports how many were omitted. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`. |
+| Key                     | Type    | Default                    | Description                                                                                                                                                                                                                                                                                              |
+| ----------------------- | ------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `root`                  | `str`   | `~/.claude/projects`       | Directory to walk for session JSONL files. Must resolve under `$HOME`.                                                                                                                                                                                                                                   |
+| `poll_interval`         | `float` | `2.0`                      | Seconds between filesystem polls. Range: `[0.05, 3600]`.                                                                                                                                                                                                                                                 |
+| `tick_interval`         | `float` | `1.0`                      | Seconds between aggregator ticks (and terminal frames). Range: `[0.05, 3600]`.                                                                                                                                                                                                                           |
+| `max_files`             | `int`   | `2000`                     | Cap on the number of session files walked per poll. Overflow logs one WARN per run and processes the first N deterministically. Range: `[1, 1_000_000]`.                                                                                                                                                 |
+| `large_file_warn_bytes` | `int`   | `10 * 1024 * 1024`         | Per-poll growth above this triggers a single WARN per file per run. Range: `[1024, 10**12]`.                                                                                                                                                                                                             |
+| `stale_after_seconds`   | `int`   | `300`                      | A session silent for this long transitions to STALE. Collector state is preserved. Range: `[1, 86400]`.                                                                                                                                                                                                  |
+| `evict_after_seconds`   | `int`   | `2100`                     | A session silent for this long is EVICTED. `reset()` is called on every collector and the cursor is dropped. Must be strictly greater than `stale_after_seconds`. Range: `[1, 86400]`.                                                                                                                   |
+| `display_mode`          | `str`   | `"project"`                | Watch dashboard layout. `"project"` rolls every active session in a project into a single row with fleet-worst severity, active count, and aggregate metric summary. `"session"` renders the 0.2.x one-block-per-session layout. The `--by-session` CLI flag forces `"session"` for a single invocation. |
+| `display_limit`         | `int`   | `20`                       | Max session blocks rendered per frame in `"session"` mode. Ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`.                                                                       |
+| `display_project_limit` | `int`   | `10`                       | Max project rows rendered per frame in `"project"` mode. Ranked by fleet-worst severity then most-recent activity.                                                                                                                                                                                       |
+| `cursor_cache_enabled`  | `bool`  | `true`                     | Seed each polled file from its last saved byte offset on startup instead of re-reading from byte 0. Disable for fully reproducible cold-start benchmarks.                                                                                                                                                |
+| `cursor_cache_dir`      | `str`   | `~/.local/state/codevigil` | Directory that holds the persistent cursor cache. Must resolve under `$HOME`.                                                                                                                                                                                                                            |
 
 ### Watch lifecycle
 
@@ -47,9 +51,9 @@ A session moves through three states: `ACTIVE` → `STALE` → `EVICTED`.
 
 ## `[collectors]`
 
-| Key       | Type        | Default                                                | Description                                                                                                                                                                            |
-| --------- | ----------- | ------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled` | `list[str]` | `["read_edit_ratio", "stop_phrase", "reasoning_loop"]` | The user-facing collectors that ingest events. Must contain only names that exist in the registry. Duplicates are rejected. `parse_health` is **always on** and not part of this list. |
+| Key       | Type        | Default                                                                       | Description                                                                                                                                                                                                                                                                                                           |
+| --------- | ----------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled` | `list[str]` | `["read_edit_ratio", "stop_phrase", "reasoning_loop", "thinking", "prompts"]` | The user-facing collectors that ingest events. Must contain only names that exist in the registry. Duplicates are rejected. `parse_health` is **always on** and not part of this list. 0.3.0 adds `thinking` and `prompts` to the default list — users with an explicit override in their config file are unaffected. |
 
 Each enabled collector has its own subsection. The shipped subsections are documented below.
 
@@ -113,6 +117,22 @@ Unknown keys in the table form raise `ConfigError("config.unknown_key")`. Bad mo
 | `min_tool_calls_for_severity` | `int`   | `20`    | Number of tool calls the collector must see before it emits anything other than `OK`. Short sessions that happen to open with a self-correction phrase do not trigger false WARNs. Range: `[0, 100_000]`. |
 | `experimental`                | `bool`  | `true`  | As above.                                                                                                                                                                                                 |
 
+### `[collectors.thinking]`
+
+| Key            | Type   | Default | Description                                                                                                                                                                     |
+| -------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `experimental` | `bool` | `true`  | Marks the collector output as experimental in watch headers and cohort report column headers. The collector itself has no tunable thresholds — severity is always OK by design. |
+
+The `thinking` collector observes `EventKind.THINKING` events and exposes the visible-vs-redacted ratio as its primary scalar, plus median visible-block and median signature-block character lengths in `detail`. Headline signal for the #42796 thinking-depth-decline cohort analysis. No threshold, no severity gate — this is a descriptive counter feeding cohort trends, not an alarm. Disable by removing `"thinking"` from `collectors.enabled`.
+
+### `[collectors.prompts]`
+
+| Key            | Type   | Default | Description                                                                                                                                                                     |
+| -------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `experimental` | `bool` | `true`  | Marks the collector output as experimental in watch headers and cohort report column headers. The collector itself has no tunable thresholds — severity is always OK by design. |
+
+The `prompts` collector counts `EventKind.USER_MESSAGE` events per session. Primary scalar is the cumulative user-turn count; it feeds the #42796 "prompts per session" per-week cohort mean. Like `thinking`, it is a descriptive counter — no threshold, no severity gate. Disable by removing `"prompts"` from `collectors.enabled`.
+
 ## `[renderers]`
 
 | Key       | Type        | Default        | Description                                                                                                                               |
@@ -155,10 +175,10 @@ The practical implication: a user who sets `warn_threshold = 5.0` for `read_edit
 
 Controls the turn-level task classifier. This is an **experimental** feature; the category labels and cascade rules may change between minor releases.
 
-| Key            | Type   | Default | Description                                                                                                                                                                      |
-| -------------- | ------ | ------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Key            | Type   | Default | Description                                                                                                                                                                                                                                       |
+| -------------- | ------ | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `enabled`      | `bool` | `true`  | When `true`, each completed turn is classified via the two-stage cascade and `session_task_type` / `turn_task_types` are written to the session report. Set to `false` to skip classification entirely; both fields will be `null` in the report. |
-| `experimental` | `bool` | `true`  | Marks the feature as experimental. Flip to `false` after you have validated the category labels against your own session corpus. Has no effect on runtime behaviour; it is metadata for dashboards and report consumers. |
+| `experimental` | `bool` | `true`  | Marks the feature as experimental. Flip to `false` after you have validated the category labels against your own session corpus. Has no effect on runtime behaviour; it is metadata for dashboards and report consumers.                          |
 
 ### Disabling the classifier
 
@@ -173,13 +193,13 @@ When disabled, `session_task_type` and `turn_task_types` are `null` in every ses
 
 The classifier assigns one of five labels to each turn, then aggregates to session level by majority vote:
 
-| Label           | Meaning                                                  |
-| --------------- | -------------------------------------------------------- |
-| `exploration`   | Read-heavy investigation with minimal or no mutations.   |
-| `mutation_heavy`| Three or more file-write operations with no bash calls.  |
-| `debug_loop`    | Bash execution co-present with file mutations (fix/run). |
-| `planning`      | Pure text turn — no tool calls at all.                   |
-| `mixed`         | No single category exceeds 50 % of classified turns.     |
+| Label            | Meaning                                                  |
+| ---------------- | -------------------------------------------------------- |
+| `exploration`    | Read-heavy investigation with minimal or no mutations.   |
+| `mutation_heavy` | Three or more file-write operations with no bash calls.  |
+| `debug_loop`     | Bash execution co-present with file mutations (fix/run). |
+| `planning`       | Pure text turn — no tool calls at all.                   |
+| `mixed`          | No single category exceeds 50 % of classified turns.     |
 
 See [`docs/classifier.md`](classifier.md) for the full cascade algorithm and rule specifications.
 
