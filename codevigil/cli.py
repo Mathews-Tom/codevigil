@@ -1575,7 +1575,7 @@ def _run_report_multi_period(
         ),
     )
 
-    fmt: str = getattr(args, "format", "json")
+    fmt: str = getattr(args, "format", None) or "json"
     reporter.update(phase="rendering", message="rendering multi-period report", target="")
     if fmt == "json":
         payload = _render_multi_period_json(period_reports)

@@ -101,14 +101,76 @@ def _write_session(path: Path, ts_date: str, session_id: str) -> None:
 
 @pytest.fixture
 def recent_session_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Session directory with one session from today (UTC) and privacy gate configured."""
+    """Session directory with one session from today (UTC) and privacy gate configured.
+
+    Events are stamped at the current wall-clock UTC time, not at a fixed
+    hour. The multi-period "today" window is ``(midnight_today, now)`` —
+    if the fixture used a fixed hour like ``T09:00:00+00:00``, the session
+    would fall outside the window any time CI ran before 09:00 UTC.
+    """
     home = _setup_home(tmp_path, monkeypatch)
     sessions_dir = home / "sessions"
     sessions_dir.mkdir()
-    # Use today's date so the session falls within the "today" window.
-    today_str = datetime.now(tz=UTC).strftime("%Y-%m-%d")
-    _write_session(sessions_dir / "today-s0.jsonl", today_str, "today-s0")
+    now = datetime.now(tz=UTC)
+    _write_session_at(sessions_dir / "today-s0.jsonl", now, "today-s0")
     return sessions_dir
+
+
+def _write_session_at(path: Path, when: datetime, session_id: str) -> None:
+    """Write a minimal JSONL session whose events sit just before ``when``.
+
+    Events are spaced at one-second intervals ending at ``when - 1s`` so they
+    remain strictly inside any window whose upper bound is ``now``.
+    """
+    base = when - timedelta(seconds=3)
+    lines = [
+        json.dumps(
+            {
+                "type": "system",
+                "timestamp": (base + timedelta(seconds=0)).isoformat(),
+                "session_id": session_id,
+                "subtype": "session_start",
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": (base + timedelta(seconds=1)).isoformat(),
+                "session_id": session_id,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t-r",
+                            "name": "Read",
+                            "input": {"file_path": "/home/user/code.py"},
+                        }
+                    ]
+                },
+            }
+        ),
+        json.dumps(
+            {
+                "type": "assistant",
+                "timestamp": (base + timedelta(seconds=2)).isoformat(),
+                "session_id": session_id,
+                "message": {
+                    "content": [
+                        {
+                            "type": "tool_use",
+                            "id": "t-w",
+                            "name": "Write",
+                            "input": {
+                                "file_path": "/home/user/code.py",
+                                "content": "x = 1",
+                            },
+                        }
+                    ]
+                },
+            }
+        ),
+    ]
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
 @pytest.fixture
