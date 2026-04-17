@@ -21,6 +21,7 @@ import pytest
 
 from codevigil.analysis.store import (
     CURRENT_SCHEMA_VERSION,
+    AmbiguousSessionError,
     MigrationError,
     SessionReport,
     SessionStore,
@@ -376,6 +377,29 @@ def test_store_get_report_falls_back_to_session_id_for_root_aware_files(tmp_path
     assert loaded is not None
     assert loaded.session_key == "root-a:shared"
     assert loaded.root_id == "root-a"
+
+
+def test_store_get_report_rejects_ambiguous_session_id(tmp_path: Path) -> None:
+    store = SessionStore(base_dir=tmp_path)
+    store.write(
+        _make_report(
+            "shared",
+            session_key=make_session_key("root-a", "shared"),
+            root_id="root-a",
+            root_label="/tmp/root-a",
+        )
+    )
+    store.write(
+        _make_report(
+            "shared",
+            session_key=make_session_key("root-b", "shared"),
+            root_id="root-b",
+            root_label="/tmp/root-b",
+        )
+    )
+
+    with pytest.raises(AmbiguousSessionError, match="use the full session_key"):
+        store.get_report("shared")
 
 
 def test_store_get_report_missing_returns_none(tmp_path: Path) -> None:

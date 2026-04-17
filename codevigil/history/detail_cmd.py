@@ -29,7 +29,7 @@ import rich.panel
 import rich.table
 import rich.text
 
-from codevigil.analysis.store import SessionReport, SessionStore
+from codevigil.analysis.store import AmbiguousSessionError, SessionReport, SessionStore
 from codevigil.history.filters import (
     classify_metric_severity,
     format_duration,
@@ -68,7 +68,11 @@ def run_detail(
         out = sys.stdout
 
     store = SessionStore(base_dir=store_dir)
-    report = store.get_report(session_id)
+    try:
+        report = store.get_report(session_id)
+    except AmbiguousSessionError as exc:
+        out.write(f"{exc}\n")
+        return 1
     if report is None:
         out.write(f"session not found: {session_id!r}\n")
         return 1

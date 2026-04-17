@@ -92,6 +92,10 @@ class MigrationError(StoreError):
     """Raised when a stored record cannot be migrated to the current schema."""
 
 
+class AmbiguousSessionError(StoreError):
+    """Raised when a plain session_id matches multiple persisted reports."""
+
+
 # ---------------------------------------------------------------------------
 # Public record type
 # ---------------------------------------------------------------------------
@@ -434,24 +438,34 @@ class SessionStore:
         path = self._base_dir / f"{identifier}.json"
         if path.exists():
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-                return SessionReport.from_dict(raw)
+                return self._load_report_file(path)
             except (OSError, json.JSONDecodeError, MigrationError, StoreError) as exc:
                 _LOG.warning("failed to load session report %s: %s", identifier, exc)
                 return None
         if not self._base_dir.exists():
             return None
+        matched: SessionReport | None = None
         for candidate in self._base_dir.iterdir():
             if candidate.suffix != ".json" or candidate.stem.startswith("."):
                 continue
             try:
-                raw = json.loads(candidate.read_text(encoding="utf-8"))
-                report = SessionReport.from_dict(raw)
+                report = self._load_report_file(candidate)
             except (OSError, json.JSONDecodeError, MigrationError, StoreError):
                 continue
             if report.session_id == identifier or report.session_key == identifier:
-                return report
-        return None
+                if report.session_key == identifier:
+                    return report
+                if matched is not None and matched.session_key != report.session_key:
+                    raise AmbiguousSessionError(
+                        f"session id {identifier!r} matched multiple reports; "
+                        "use the full session_key instead"
+                    )
+                matched = report
+        return matched
+
+    def _load_report_file(self, path: Path) -> SessionReport:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+        return SessionReport.from_dict(raw)
 
     # ------------------------------------------------------------------ internals
 
