@@ -20,6 +20,7 @@ from codevigil.collectors.stop_phrase import StopPhraseCollector
 from codevigil.config import CONFIG_DEFAULTS
 from codevigil.parser import ParseStats
 from codevigil.types import Event, EventKind
+from codevigil.watch_roots import legacy_session_key
 
 
 def _tool_call(tool_name: str, file_path: str | None = None) -> Event:
@@ -147,7 +148,7 @@ def test_aggregator_absorbs_garbage_collector_state() -> None:
     from codevigil.projects import ProjectRegistry
     from codevigil.watcher import SourceEvent, SourceEventKind
 
-    def provider(session_id: str) -> dict[str, dict[str, Any]] | None:
+    def provider(session_key: str) -> dict[str, dict[str, Any]] | None:
         return {"parse_health": {"total_lines": "not an int"}}
 
     aggregator = SessionAggregator(
@@ -168,7 +169,7 @@ def test_aggregator_absorbs_garbage_collector_state() -> None:
         timestamp=datetime(2026, 4, 15, 10, 0, 0, tzinfo=UTC),
     )
     aggregator._dispatch_source_event(event)
-    ctx = aggregator.sessions.get("agent-test")
+    ctx = aggregator.sessions.get(legacy_session_key("agent-test"))
     assert ctx is not None
     # parse_health is always instantiated; its _stats must be fresh.
     ph = ctx.collectors["parse_health"]

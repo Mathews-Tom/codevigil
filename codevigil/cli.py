@@ -43,7 +43,13 @@ from codevigil.analysis.cohort import VALID_DIMENSIONS, CohortCell, CohortSlice
 from codevigil.analysis.compare import ComparisonResult, MetricComparison
 from codevigil.analysis.store import SessionReport, SessionStore
 from codevigil.bootstrap import BootstrapManager
-from codevigil.config import CONFIG_DEFAULTS, ConfigError, load_config, render_config_check
+from codevigil.config import (
+    CONFIG_DEFAULTS,
+    ConfigError,
+    load_config,
+    render_config_check,
+    resolve_watch_roots,
+)
 from codevigil.errors import CodevigilError, ErrorLevel
 from codevigil.parser import SessionParser, parse_session
 from codevigil.privacy import PrivacyViolationError
@@ -51,7 +57,7 @@ from codevigil.projects import ProjectRegistry
 from codevigil.renderers.terminal import TerminalRenderer, WatchStatus
 from codevigil.types import Event, MetricSnapshot, Severity
 from codevigil.ui.progress import progress_reporter
-from codevigil.watcher import PollingSource
+from codevigil.watcher import MultiSource, PollingSource
 
 # ---------------------------------------------------------------------------
 # Argument parser
@@ -347,7 +353,6 @@ def _run_ingest(args: argparse.Namespace) -> int:
         default_db_path,
     )
     from codevigil.ingest import run_ingest
-    from codevigil.privacy import PrivacyViolationError
 
     try:
         resolved = load_config(config_path=args.config)
@@ -356,19 +361,10 @@ def _run_ingest(args: argparse.Namespace) -> int:
         return 2 if err.level is ErrorLevel.CRITICAL else 1
 
     cfg = resolved.values
-    watch_cfg = cfg["watch"]
-    root = Path(str(watch_cfg["root"])).expanduser()
-
-    # Enforce the same home-scope privacy gate the watcher applies so a
-    # misconfigured watch.root cannot silently read outside $HOME.
     try:
-        resolved_root = root.resolve()
-        if not resolved_root.is_relative_to(Path.home().resolve()):
-            raise PrivacyViolationError(
-                f"ingest root {resolved_root!s} is outside the user home directory"
-            )
-    except PrivacyViolationError as exc:
-        sys.stderr.write(f"CRITICAL: ingest.path_scope_violation: {exc}\n")
+        roots = resolve_watch_roots(cfg)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
         return 2
 
     db_override: Path | None = getattr(args, "db", None)
@@ -386,7 +382,7 @@ def _run_ingest(args: argparse.Namespace) -> int:
     try:
         reporter = progress_reporter(total_items=None)
         result = run_ingest(
-            root=root,
+            roots=roots,
             store=store,
             config=cfg,
             console=console,
@@ -482,14 +478,14 @@ def _build_collector_state_provider(
     if not db_path.exists():
         return None
 
-    def provider(session_id: str) -> dict[str, dict[str, Any]] | None:
+    def provider(session_key: str) -> dict[str, dict[str, Any]] | None:
         store = ProcessedSessionStore(db_path)
         try:
             store.open()
         except ProcessedStoreError:
             return None
         try:
-            record = store.get_session(session_id)
+            record = store.get_session(session_key)
         finally:
             store.close()
         if record is None:
@@ -605,8 +601,8 @@ def _auto_ingest_if_missing(
         console_err_writer(f"CRITICAL: {exc.code}: {exc.message}\n")
         return 2
     try:
-        root = Path(str(cfg["watch"]["root"])).expanduser()
-        run_ingest(root=root, store=store, config=cfg, console=console, force=False)
+        roots = resolve_watch_roots(cfg)
+        run_ingest(roots=roots, store=store, config=cfg, console=console, force=False)
     finally:
         store.close()
     return 0
@@ -639,15 +635,22 @@ def _run_watch(args: argparse.Namespace) -> int:
     seed_cursors = _load_cursor_seeds_from_store(db_path)
 
     try:
-        source = PollingSource(
-            Path(watch_cfg["root"]),
-            interval=float(watch_cfg["poll_interval"]),
-            max_files=int(watch_cfg["max_files"]),
-            large_file_warn_bytes=int(watch_cfg["large_file_warn_bytes"]),
-            seed_cursors=seed_cursors,
-        )
-    except PrivacyViolationError as exc:
-        sys.stderr.write(f"CRITICAL: watcher.path_scope_violation: {exc}\n")
+        roots = resolve_watch_roots(cfg)
+        sources = [
+            PollingSource(
+                root.root_path,
+                root_id=root.root_id,
+                interval=float(watch_cfg["poll_interval"]),
+                max_files=int(watch_cfg["max_files"]),
+                large_file_warn_bytes=int(watch_cfg["large_file_warn_bytes"]),
+                seed_cursors=seed_cursors,
+            )
+            for root in roots
+        ]
+        source = MultiSource(sources) if len(sources) > 1 else sources[0]
+    except (PrivacyViolationError, ConfigError) as exc:
+        message = str(exc) if isinstance(exc, PrivacyViolationError) else _format_error(exc).strip()
+        sys.stderr.write(f"CRITICAL: watcher.path_scope_violation: {message}\n")
         return 2
 
     bootstrap = _build_bootstrap_manager(cfg)

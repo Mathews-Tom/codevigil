@@ -93,6 +93,7 @@ from codevigil.types import (
     SessionState,
     Severity,
 )
+from codevigil.watch_roots import LEGACY_ROOT_ID, legacy_session_key
 from codevigil.watcher import Source, SourceEvent, SourceEventKind
 
 _PARSE_HEALTH_NAME: str = "parse_health"
@@ -123,6 +124,8 @@ class _SessionContext:
     """
 
     session_id: str
+    session_key: str
+    root_id: str
     file_path: Path
     project_hash: str
     parser: SessionParser
@@ -156,6 +159,63 @@ class _SessionContext:
 
 
 _ClockFn = Callable[[], float]
+
+
+class _SessionView:
+    """Compatibility view over the internal session-keyed context map."""
+
+    def __init__(self, sessions: dict[str, _SessionContext]) -> None:
+        self._sessions = sessions
+
+    def _resolve_key(self, key: str) -> str | None:
+        if key in self._sessions:
+            return key
+        matches = [
+            session_key for session_key, ctx in self._sessions.items() if ctx.session_id == key
+        ]
+        if len(matches) == 1:
+            return matches[0]
+        return None
+
+    def __getitem__(self, key: str) -> _SessionContext:
+        resolved = self._resolve_key(key)
+        if resolved is None:
+            raise KeyError(key)
+        return self._sessions[resolved]
+
+    def get(self, key: str, default: Any = None) -> _SessionContext | Any:
+        resolved = self._resolve_key(key)
+        if resolved is None:
+            return default
+        return self._sessions[resolved]
+
+    def pop(self, key: str, default: Any = None) -> _SessionContext | Any:
+        resolved = self._resolve_key(key)
+        if resolved is None:
+            return default
+        return self._sessions.pop(resolved, default)
+
+    def __contains__(self, key: object) -> bool:
+        return isinstance(key, str) and self._resolve_key(key) is not None
+
+    def values(self) -> Any:
+        return self._sessions.values()
+
+    def items(self) -> Any:
+        return self._sessions.items()
+
+    def __iter__(self) -> Any:
+        return iter(self._sessions)
+
+    def __len__(self) -> int:
+        return len(self._sessions)
+
+    def __eq__(self, other: object) -> bool:
+        if isinstance(other, dict):
+            return self._sessions == other
+        if isinstance(other, _SessionView):
+            return self._sessions == other._sessions
+        return NotImplemented
 
 
 class SessionAggregator:
@@ -192,7 +252,7 @@ class SessionAggregator:
         self._sessions: dict[str, _SessionContext] = {}
         self._bootstrap: BootstrapManager | None = bootstrap
         # Phase C5: collector-state restore provider. Given a session
-        # ID, returns a ``{collector_name: state_dict}`` mapping from
+        # key, returns a ``{collector_name: state_dict}`` mapping from
         # the processed-session store, or ``None`` when no persisted
         # state exists for that session. Called once from
         # ``_ensure_session`` immediately after fresh collectors are
@@ -233,10 +293,10 @@ class SessionAggregator:
     # --------------------------------------------------------------- properties
 
     @property
-    def sessions(self) -> dict[str, _SessionContext]:
+    def sessions(self) -> _SessionView:
         """Read-only-ish accessor used by tests; do not mutate externally."""
 
-        return self._sessions
+        return _SessionView(self._sessions)
 
     @property
     def eviction_churn(self) -> int:
@@ -369,17 +429,18 @@ class SessionAggregator:
             # the aggregator just keeps consuming.
             return
         if kind is SourceEventKind.DELETE:
-            self._evict_session(source_event.session_id)
+            self._evict_session(self._event_session_key(source_event))
             return
 
     def _ensure_session(self, source_event: SourceEvent) -> _SessionContext:
         sid = source_event.session_id
-        existing = self._sessions.get(sid)
+        session_key = self._event_session_key(source_event)
+        existing = self._sessions.get(session_key)
         if existing is not None:
             return existing
         parser = SessionParser(session_id=sid)
         collectors = self._instantiate_collectors(parser)
-        self._maybe_restore_collector_state(sid, collectors)
+        self._maybe_restore_collector_state(session_key, collectors)
         now_clock = self._clock()
         now_wall = source_event.timestamp
         project_hash = self._extract_project_hash(source_event.path, session_id=sid)
@@ -393,6 +454,8 @@ class SessionAggregator:
         last_monotonic = now_clock - age_seconds
         ctx = _SessionContext(
             session_id=sid,
+            session_key=session_key,
+            root_id=source_event.root_id or LEGACY_ROOT_ID,
             file_path=source_event.path,
             project_hash=project_hash,
             parser=parser,
@@ -401,19 +464,19 @@ class SessionAggregator:
             last_event_time=now_wall,
             last_monotonic=last_monotonic,
         )
-        self._sessions[sid] = ctx
+        self._sessions[session_key] = ctx
         return ctx
 
     def _maybe_restore_collector_state(
         self,
-        session_id: str,
+        session_key: str,
         collectors: dict[str, Collector],
     ) -> None:
         """Hydrate collectors from persistent state when one is available.
 
         When the caller configured ``collector_state_provider`` (Phase
         C5 watch path), we consult the processed-session store keyed by
-        ``session_id``. A hit returns ``{collector_name: state_dict}``;
+        ``session_key``. A hit returns ``{collector_name: state_dict}``;
         each collector that implements ``restore_state`` then hydrates
         from its slice. Collectors that do not implement
         ``restore_state`` (or that lack a matching key in the stored
@@ -422,7 +485,7 @@ class SessionAggregator:
 
         if self._collector_state_provider is None:
             return
-        state = self._collector_state_provider(session_id)
+        state = self._collector_state_provider(session_key)
         if not state:
             return
         for name, collector in collectors.items():
@@ -458,6 +521,12 @@ class SessionAggregator:
                 except (TypeError, ValueError):
                     continue
         return out
+
+    @staticmethod
+    def _event_session_key(source_event: SourceEvent) -> str:
+        if source_event.session_key:
+            return source_event.session_key
+        return legacy_session_key(source_event.session_id)
 
     def _extract_project_hash(self, path: Path, *, session_id: str) -> str:
         """Pull the project-hash directory from the canonical path layout.
@@ -731,7 +800,7 @@ class SessionAggregator:
             payload[collector_name] = snap
         if not payload:
             return
-        bootstrap.observe_session(ctx.session_id, payload)
+        bootstrap.observe_session(ctx.session_key, payload)
         if bootstrap.finalize_if_ready():
             record(
                 CodevigilError(
@@ -792,12 +861,12 @@ class SessionAggregator:
 
     def _evict_session(
         self,
-        session_id: str,
+        session_key: str,
         *,
         reason: str = "source_delete",
         silence_seconds: float | None = None,
     ) -> None:
-        ctx = self._sessions.pop(session_id, None)
+        ctx = self._sessions.pop(session_key, None)
         if ctx is None:
             return
         ctx.state = SessionState.EVICTED
@@ -806,7 +875,8 @@ class SessionAggregator:
         # watcher or a chatty editor that rolls files every few minutes
         # shows up as an elevated eviction rate in the INFO log.
         context: dict[str, Any] = {
-            "session_id": session_id,
+            "session_id": ctx.session_id,
+            "session_key": ctx.session_key,
             "reason": reason,
             "event_count": ctx.event_count,
             "remaining_sessions": len(self._sessions),
@@ -819,7 +889,8 @@ class SessionAggregator:
                 source=ErrorSource.AGGREGATOR,
                 code="aggregator.session_evicted",
                 message=(
-                    f"session {session_id!r} evicted ({reason}); {ctx.event_count} events processed"
+                    f"session {ctx.session_key!r} evicted ({reason}); "
+                    f"{ctx.event_count} events processed"
                 ),
                 context=context,
             )
