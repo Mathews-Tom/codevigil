@@ -76,13 +76,14 @@ The CI workflow at `.github/workflows/ci.yml` runs the gate as a separate `priva
 
 ## Layer 3: filesystem scope check
 
-The watcher and the report writer both refuse to operate outside `$HOME` via a `Path.resolve().is_relative_to(Path.home().resolve())` check. Specifically:
+The watcher, ingest path, report writer, and config root normaliser all refuse to operate outside `$HOME` via a `Path.resolve().is_relative_to(Path.home().resolve())` check. Specifically:
 
+- **`resolve_watch_roots()`** validates every configured entry in `watch.roots` after `expanduser().resolve()`. Any root outside `$HOME` raises `ConfigError` before watch or ingest starts.
 - **`PollingSource(root)`** validates `root.resolve()` against `Path.home().resolve()` at construction time. Any root outside `$HOME` raises `PrivacyViolationError` and records a CRITICAL `CodevigilError` on the channel before the exception propagates.
 - **`JsonFileRenderer(output_dir)`** applies the same check at construction time. Same error path.
 - **`codevigil report --output DIR`** applies the same check before writing any file.
 
-This protects against accidentally pointing codevigil at a system directory or shared mount, and against accidentally writing reports to a path that you didn't intend.
+This protects against accidentally pointing codevigil at a system directory or shared mount, and against accidentally writing reports to a path that you didn't intend. Multi-root support does not weaken the rule: every configured watch root is validated independently, and startup fails if any one of them is out of scope.
 
 The check uses `Path.resolve()` so symlinks are followed once at construction time — a symlink inside `$HOME` that points outside `$HOME` is also blocked.
 
@@ -138,7 +139,7 @@ pip show codevigil
 
 The `Requires` field lists only `rich>=13`. codevigil's runtime imports are stdlib modules plus `rich` — no networking libraries, no subprocess launchers, nothing that could exfiltrate data. `rich` itself makes no network calls.
 
-The 0.2.0 experimental task classifier is implemented on top of stdlib `re` alone. It reads turn text and tool-call names from the already-parsed event stream, applies a two-stage cascade (tool-presence heuristic → keyword regex) entirely in-process, and attaches the resulting label to the in-memory `Turn` and the on-disk `SessionReport`. There is no remote model call, no telemetry, no network handshake, and no new dependency. The privacy guarantees above cover the classifier the same way they cover every other component.
+The experimental task classifier is implemented on top of stdlib `re` alone. It reads turn text and tool-call names from the already-parsed event stream, applies a two-stage cascade (tool-presence heuristic → keyword regex) entirely in-process, and attaches the resulting label to the in-memory `Turn` and the on-disk `SessionReport`. There is no remote model call, no telemetry, no network handshake, and no new dependency. The privacy guarantees above cover the classifier the same way they cover every other component.
 
 ## What to do if you find a violation
 

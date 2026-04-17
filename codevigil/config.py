@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource
+from codevigil.watch_roots import RootDescriptor, describe_root
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -32,6 +33,7 @@ from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource
 CONFIG_DEFAULTS: dict[str, Any] = {
     "watch": {
         "root": "~/.claude/projects",
+        "roots": ["~/.claude/projects"],
         "poll_interval": 60.0,
         "max_files": 2000,
         "large_file_warn_bytes": 10 * 1024 * 1024,
@@ -164,6 +166,7 @@ _VALID_OUTPUT_FORMATS: frozenset[str] = frozenset({"json", "markdown"})
 _ENV_BINDINGS: dict[str, tuple[str, ...]] = {
     "CODEVIGIL_LOG_PATH": ("logging", "log_path"),
     "CODEVIGIL_WATCH_ROOT": ("watch", "root"),
+    "CODEVIGIL_WATCH_ROOTS": ("watch", "roots"),
     "CODEVIGIL_WATCH_POLL_INTERVAL": ("watch", "poll_interval"),
     "CODEVIGIL_WATCH_TICK_INTERVAL": ("watch", "tick_interval"),
     "CODEVIGIL_WATCH_DISPLAY_LIMIT": ("watch", "display_limit"),
@@ -210,6 +213,7 @@ class ResolvedConfig:
 
     values: dict[str, Any]
     sources: dict[str, str] = field(default_factory=dict)
+    deprecations: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -247,9 +251,15 @@ def load_config(
 
     values: dict[str, Any] = _deep_copy_defaults()
     sources: dict[str, str] = _flatten_sources(values, source="default")
+    deprecations: list[str] = []
 
     file_values, file_path_used = _load_file_layer(config_path)
     if file_values is not None:
+        _collect_deprecations_from_layer(
+            deprecations,
+            source=f"file:{file_path_used}",
+            values=file_values,
+        )
         _validate_layer_shape(file_values, source=f"file:{file_path_used}")
         _apply_layer(
             values,
@@ -260,24 +270,39 @@ def load_config(
 
     env_values = _collect_env_overrides(environment)
     for dotted, (raw_value, env_name) in env_values.items():
+        if dotted == "watch.root":
+            deprecations.append(
+                "CODEVIGIL_WATCH_ROOT is deprecated; use CODEVIGIL_WATCH_ROOTS instead."
+            )
         coerced = _coerce_scalar(dotted, raw_value, source=f"env:{env_name}")
         _assign_dotted(values, dotted, coerced)
         sources[dotted] = f"env:{env_name}"
 
     for dotted, raw_value in overrides.items():
+        if dotted == "watch.root":
+            deprecations.append("watch.root is deprecated; use watch.roots instead.")
         _check_known_path(dotted, source="cli")
         coerced = _coerce_scalar(dotted, raw_value, source=f"cli:--{dotted}")
         _assign_dotted(values, dotted, coerced)
         sources[dotted] = f"cli:--{dotted}"
 
+    _normalize_watch_root_aliases(values, sources)
     _validate_resolved(values)
-    return ResolvedConfig(values=values, sources=sources)
+    return ResolvedConfig(
+        values=values,
+        sources=sources,
+        deprecations=tuple(dict.fromkeys(deprecations)),
+    )
 
 
 def render_config_check(resolved: ResolvedConfig) -> str:
     """Format a resolved config for the ``codevigil config check`` command."""
 
     lines: list[str] = ["codevigil config check"]
+    if resolved.deprecations:
+        lines.append("deprecations")
+        for message in resolved.deprecations:
+            lines.append(f"  - {message}")
     for dotted in sorted(resolved.sources):
         value = _read_dotted(resolved.values, dotted)
         source = resolved.sources[dotted]
@@ -339,6 +364,19 @@ def _load_file_layer(config_path: Path | None) -> tuple[dict[str, Any] | None, P
             context={"path": str(expanded)},
         )
     return _read_toml(expanded), expanded
+
+
+def _collect_deprecations_from_layer(
+    deprecations: list[str],
+    *,
+    source: str,
+    values: dict[str, Any],
+) -> None:
+    watch = values.get("watch")
+    if not isinstance(watch, dict):
+        return
+    if "root" in watch:
+        deprecations.append(f"{source} sets deprecated watch.root; use watch.roots instead.")
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -639,9 +677,59 @@ def _coerce_scalar(dotted: str, raw: Any, *, source: str) -> Any:
     if isinstance(default, float):
         return _parse_str_as_float(dotted, raw, source=source)
     if isinstance(default, list):
+        if dotted == "watch.roots":
+            return [part.strip() for part in raw.split(os.pathsep) if part.strip()]
         # Comma-separated env / CLI form: "a,b,c".
         return [part.strip() for part in raw.split(",") if part.strip()]
     return raw
+
+
+def _source_rank(source: str) -> int:
+    if source.startswith("cli:"):
+        return 3
+    if source.startswith("env:"):
+        return 2
+    if source.startswith("file:"):
+        return 1
+    return 0
+
+
+def _normalize_watch_root_aliases(values: dict[str, Any], sources: dict[str, str]) -> None:
+    """Resolve legacy ``watch.root`` and canonical ``watch.roots`` into sync.
+
+    ``watch.roots`` is the canonical multi-root field. ``watch.root`` remains a
+    single-root compatibility alias for existing runtime call sites. When both
+    are explicitly configured, the higher-precedence layer wins; ties within the
+    same layer prefer ``watch.roots``.
+    """
+
+    root_source = sources.get("watch.root", "default")
+    roots_source = sources.get("watch.roots", "default")
+    root_rank = _source_rank(root_source)
+    roots_rank = _source_rank(roots_source)
+    root_value = _read_dotted(values, "watch.root")
+    roots_value = _read_dotted(values, "watch.roots")
+
+    roots_wins = roots_rank > root_rank or (roots_rank == root_rank and roots_rank > 0)
+    if roots_wins:
+        if not roots_value:
+            raise ConfigError(
+                code="config.empty_watch_roots",
+                message="watch.roots must contain at least one path",
+                context={"key": "watch.roots", "source": roots_source},
+            )
+        _assign_dotted(values, "watch.root", roots_value[0])
+        sources["watch.root"] = roots_source
+        return
+
+    if not isinstance(root_value, str) or not root_value:
+        raise ConfigError(
+            code="config.empty_watch_root",
+            message="watch.root must be a non-empty string",
+            context={"key": "watch.root", "source": root_source},
+        )
+    _assign_dotted(values, "watch.roots", [root_value])
+    sources["watch.roots"] = root_source
 
 
 # (dotted_path, minimum, maximum, kind) — iterated in _validate_resolved.
@@ -683,6 +771,7 @@ def _validate_resolved(values: dict[str, Any]) -> None:
     )
     _validate_output_format(values)
     _validate_parse_health_undisableable(values)
+    _validate_watch_roots(values)
 
 
 def _validate_parse_health_undisableable(values: dict[str, Any]) -> None:
@@ -781,6 +870,66 @@ def _validate_output_format(values: dict[str, Any]) -> None:
         )
 
 
+def _validate_watch_roots(values: dict[str, Any]) -> None:
+    roots = _read_dotted(values, "watch.roots")
+    if not roots:
+        raise ConfigError(
+            code="config.empty_watch_roots",
+            message="watch.roots must contain at least one path",
+            context={"key": "watch.roots"},
+        )
+
+
+def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
+    """Return deduplicated, validated watch roots in configuration order."""
+
+    raw_roots = _read_dotted(values, "watch.roots")
+    home = Path.home().resolve()
+    descriptors: list[RootDescriptor] = []
+    seen_paths: set[Path] = set()
+    for raw in raw_roots:
+        path = _resolve_watch_root_path(raw, home)
+        if path in seen_paths:
+            continue
+        overlapping = _find_overlapping_root(path, seen_paths)
+        if overlapping is not None:
+            raise ConfigError(
+                code="config.overlapping_watch_roots",
+                message=(
+                    f"watch roots must be disjoint; {str(path)!r} overlaps with "
+                    f"{str(overlapping)!r}"
+                ),
+                context={"root": str(path), "overlaps_with": str(overlapping)},
+            )
+        seen_paths.add(path)
+        descriptors.append(describe_root(path))
+    if not descriptors:
+        raise ConfigError(
+            code="config.empty_watch_roots",
+            message="watch.roots must contain at least one path",
+            context={"key": "watch.roots"},
+        )
+    return descriptors
+
+
+def _resolve_watch_root_path(raw: Any, home: Path) -> Path:
+    path = Path(str(raw)).expanduser().resolve()
+    if path.is_relative_to(home):
+        return path
+    raise ConfigError(
+        code="config.watch_root_scope_violation",
+        message=f"watch root {str(path)!r} is outside the user home directory {str(home)!r}",
+        context={"root": str(path), "home": str(home)},
+    )
+
+
+def _find_overlapping_root(path: Path, seen_paths: set[Path]) -> Path | None:
+    for existing in seen_paths:
+        if path.is_relative_to(existing) or existing.is_relative_to(path):
+            return existing
+    return None
+
+
 def _format_value(value: Any) -> str:
     if isinstance(value, str):
         return repr(value)
@@ -796,4 +945,5 @@ __all__ = [
     "ResolvedValue",
     "load_config",
     "render_config_check",
+    "resolve_watch_roots",
 ]

@@ -113,6 +113,9 @@ class SessionMeta:
     state: SessionState
     snapshot_history: dict[str, tuple[float, ...]] = field(default_factory=dict)
     session_task_type: str | None = None
+    session_key: str | None = None
+    root_id: str | None = None
+    root_label: str | None = None
 
 
 @runtime_checkable

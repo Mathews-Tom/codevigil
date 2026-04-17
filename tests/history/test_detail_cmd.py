@@ -15,6 +15,7 @@ import pytest
 
 from codevigil.analysis.store import SessionStore, build_report
 from codevigil.history.detail_cmd import run_detail
+from codevigil.watch_roots import make_session_key
 
 
 def _write_session(store: SessionStore, session_id: str, **kwargs: object) -> None:
@@ -87,6 +88,25 @@ class TestRunDetail:
         code = run_detail("agent-detail4", store_dir=tmp_path, out=out)
         assert code == 0
         assert "Metrics" in out.getvalue()
+
+    def test_ambiguous_session_id_returns_1(self, tmp_path: Path) -> None:
+        store = SessionStore(base_dir=tmp_path)
+        _write_session(
+            store,
+            "shared",
+            session_key=make_session_key("root-a", "shared"),
+            root_id="root-a",
+        )
+        _write_session(
+            store,
+            "shared",
+            session_key=make_session_key("root-b", "shared"),
+            root_id="root-b",
+        )
+        out = io.StringIO()
+        code = run_detail("shared", store_dir=tmp_path, out=out)
+        assert code == 1
+        assert "use the full session_key" in out.getvalue()
 
 
 class TestDetailSnippetBranch:

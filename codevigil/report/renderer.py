@@ -236,11 +236,12 @@ def _render_period_panel_content(
         return "no sessions in period"
 
     text = rich.text.Text()
+    show_root = _should_show_root_identity(period_reports)
     for i, report in enumerate(period_reports):
         if i > 0:
             text.append("\n")
         # Session id and event count.
-        text.append(report.session_id, style="bold cyan")
+        text.append(_render_session_identity(report, show_root=show_root), style="bold cyan")
         text.append(f"  events: {report.event_count}")
         # Surface a few key metrics when available.
         metric_parts: list[str] = []
@@ -251,6 +252,20 @@ def _render_period_panel_content(
         if metric_parts:
             text.append("  " + "  ".join(metric_parts))
     return text
+
+
+def _should_show_root_identity(reports: Sequence[SessionReport]) -> bool:
+    root_ids = {report.root_id for report in reports if report.root_id}
+    if len(root_ids) > 1:
+        return True
+    session_ids = [report.session_id for report in reports]
+    return len(session_ids) != len(set(session_ids))
+
+
+def _render_session_identity(report: SessionReport, *, show_root: bool) -> str:
+    if not show_root or not report.root_label:
+        return report.session_id
+    return f"{report.session_id} ({report.root_label})"
 
 
 # ---------------------------------------------------------------------------

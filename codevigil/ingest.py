@@ -50,6 +50,7 @@ from codevigil.analysis.processed_store import (
 from codevigil.projects import ProjectRegistry
 from codevigil.types import SessionState
 from codevigil.ui.progress import ProgressReporter, progress_reporter
+from codevigil.watch_roots import RootDescriptor, make_session_key
 from codevigil.watcher import SourceEvent, SourceEventKind
 
 _HUGE_LIFECYCLE_SECONDS: int = 10_000_000_000
@@ -131,6 +132,7 @@ def _should_skip(
 
 def _feed_file(
     aggregator: SessionAggregator,
+    root: RootDescriptor,
     path: Path,
     stat: os.stat_result,
 ) -> int:
@@ -149,6 +151,9 @@ def _feed_file(
         inode=stat.st_ino,
         line=None,
         timestamp=mtime_dt,
+        root_id=root.root_id,
+        session_key=make_session_key(root.root_id, path.stem),
+        root_label=root.display_name,
     )
     # Private API: the aggregator does not expose a public "ingest one
     # SourceEvent" entry point, so we reach through the private method.
@@ -172,6 +177,9 @@ def _feed_file(
             inode=stat.st_ino,
             line=line,
             timestamp=now,
+            root_id=root.root_id,
+            session_key=make_session_key(root.root_id, path.stem),
+            root_label=root.display_name,
         )
         aggregator._dispatch_source_event(append)
     return bytes_read
@@ -179,6 +187,7 @@ def _feed_file(
 
 def _snapshot_to_record(
     aggregator: SessionAggregator,
+    root: RootDescriptor,
     path: Path,
     stat: os.stat_result,
     project_registry: ProjectRegistry,
@@ -186,7 +195,8 @@ def _snapshot_to_record(
     """Turn a freshly-ingested aggregator session into a
     :class:`ProcessedSession` ready for persistence."""
 
-    ctx = aggregator.sessions.get(path.stem)
+    session_key = make_session_key(root.root_id, path.stem)
+    ctx = aggregator.sessions.get(session_key)
     if ctx is None:
         return None
     # Taking the snapshot also drives the collectors' ``snapshot()``
@@ -210,6 +220,8 @@ def _snapshot_to_record(
     collector_state = aggregator.serialize_collector_state(ctx)
 
     return ProcessedSession(
+        session_key=ctx.session_key,
+        root_id=ctx.root_id,
         session_id=ctx.session_id,
         path=path,
         inode=stat.st_ino,
@@ -230,14 +242,14 @@ def _snapshot_to_record(
 
 def run_ingest(
     *,
-    root: Path,
+    roots: list[RootDescriptor],
     store: ProcessedSessionStore,
     config: dict[str, Any],
     console: Console,
     force: bool = False,
     reporter: ProgressReporter | None = None,
 ) -> IngestResult:
-    """Ingest every JSONL file under ``root`` into ``store``.
+    """Ingest every JSONL file under ``roots`` into ``store``.
 
     ``console`` drives the live rich :class:`~rich.progress.Progress`
     display; pass a ``Console(quiet=True)`` in tests to suppress output.
@@ -247,7 +259,10 @@ def run_ingest(
     mutated.
     """
 
-    files = _walk_jsonl_files(root)
+    files: list[tuple[RootDescriptor, Path]] = []
+    for root in roots:
+        for path in _walk_jsonl_files(root.root_path):
+            files.append((root, path))
     ingest_cfg = _build_ingest_config(config)
     project_registry = ProjectRegistry()
     aggregator = SessionAggregator(
@@ -267,9 +282,9 @@ def run_ingest(
         total=len(files),
         message=f"{len(files)} session files",
         unit="files",
-        target=str(root),
+        target=", ".join(str(root.root_path) for root in roots),
     )
-    for path in files:
+    for root, path in files:
         stat = _stat_path(path)
         if stat is None:
             active_reporter.advance(message="skipped missing file", target=path.name)
@@ -287,19 +302,20 @@ def run_ingest(
             continue
 
         active_reporter.update(phase="ingesting", message="dispatching file", target=path.name)
-        file_bytes = _feed_file(aggregator, path, stat)
+        file_bytes = _feed_file(aggregator, root, path, stat)
         bytes_read += file_bytes
         active_reporter.update(phase="persisting", message="writing processed session")
-        record = _snapshot_to_record(aggregator, path, stat, project_registry)
+        record = _snapshot_to_record(aggregator, root, path, stat, project_registry)
         if record is not None:
             store.upsert_session(record)
             processed += 1
 
         # Evict the session from the aggregator to bound memory.
-        ctx = aggregator.sessions.get(path.stem)
+        session_key = make_session_key(root.root_id, path.stem)
+        ctx = aggregator.sessions.get(session_key)
         if ctx is not None:
             ctx.state = SessionState.EVICTED
-            aggregator.sessions.pop(path.stem, None)
+            aggregator.sessions.pop(session_key, None)
         active_reporter.advance(
             message="persisted session",
             bytes_delta=file_bytes,

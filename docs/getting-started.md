@@ -8,7 +8,7 @@ A first-run walkthrough. Assumes you have already installed codevigil via `uv to
 codevigil --version
 ```
 
-If this prints `codevigil 0.2.1` (or whatever you installed), you are ready. Otherwise see [installation.md](installation.md).
+If this prints `codevigil 0.4.0` (or whatever you installed), you are ready. Otherwise see [installation.md](installation.md).
 
 ## Step 2: Look at the resolved configuration
 
@@ -119,7 +119,7 @@ Watch mode is for live monitoring. For after-the-fact analysis use report mode:
 codevigil report ~/.claude/projects
 ```
 
-With no date flags, `report` renders three stacked periods — **today** (midnight UTC → now), **7d** (now - 7 days → now), and **30d** (now - 30 days → now) — in one invocation. JSON output in this mode is an object with three top-level keys `today`, `7d`, and `30d`. This is the 0.2.0 default.
+With no date flags, `report` renders three stacked periods — **today** (midnight UTC → now), **7d** (now - 7 days → now), and **30d** (now - 30 days → now) — in one invocation. JSON output in this mode is an object with three top-level keys `today`, `7d`, and `30d`.
 
 To fall back to the original single-period mode, pass `--from` or `--to`:
 
@@ -127,7 +127,7 @@ To fall back to the original single-period mode, pass `--from` or `--to`:
 codevigil report ~/.claude/projects --format markdown --from 2026-04-01
 ```
 
-The `--from` and `--to` flags filter **events** by timestamp (not session boundaries) and clamp `started_at`/`ended_at` on each produced `SessionReport` to the in-window range. Sessions that straddle the window edges contribute only their in-window events; sessions that fall entirely outside the window emit no report at all. Scripts that depend on the pre-0.2.0 no-flag single-period output should pass `--from 1970-01-01` (or any open lower bound) to preserve the old shape.
+The `--from` and `--to` flags filter **events** by timestamp (not session boundaries) and clamp `started_at`/`ended_at` on each produced `SessionReport` to the in-window range. Sessions that straddle the window edges contribute only their in-window events; sessions that fall entirely outside the window emit no report at all. Scripts that depend on the legacy no-flag single-period output should pass `--from 1970-01-01` (or any open lower bound) to preserve the old shape.
 
 Report output is **deterministic** under identical input — sessions sort by id, metric rows sort by name, no wall-clock timestamps are embedded — so you can diff two reports across time and see exactly which sessions changed.
 
@@ -235,7 +235,7 @@ This emits a TOML snippet you can paste into `~/.config/codevigil/config.toml`. 
 
 ## Step 8: The experimental task classifier
 
-0.2.0 ships a turn-level task classifier that labels each Claude Code turn as `exploration`, `mutation_heavy`, `debug_loop`, `planning`, or `mixed` and aggregates those labels into a session-level task type. The classifier runs entirely locally using stdlib `re` and a tool-presence heuristic — zero network, zero new runtime dependencies, zero telemetry.
+codevigil ships a turn-level task classifier that labels each Claude Code turn as `exploration`, `mutation_heavy`, `debug_loop`, `planning`, or `mixed` and aggregates those labels into a session-level task type. The classifier runs entirely locally using stdlib `re` and a tool-presence heuristic — zero network, zero new runtime dependencies, zero telemetry.
 
 Labels surface in four places, each tagged `[experimental]` so you can tell classifier output apart from the deterministic collector output:
 

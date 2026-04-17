@@ -14,11 +14,14 @@ from codevigil.analysis.processed_store import (
     ProcessedStoreError,
     default_db_path,
 )
+from codevigil.watch_roots import LEGACY_ROOT_ID, legacy_session_key
 
 
 def _make_record(session_id: str = "agent-abc123") -> ProcessedSession:
     now = datetime.now(tz=UTC)
     return ProcessedSession(
+        session_key=legacy_session_key(session_id),
+        root_id=LEGACY_ROOT_ID,
         session_id=session_id,
         path=Path(f"/tmp/proj/{session_id}.jsonl"),
         inode=12345,
@@ -73,6 +76,8 @@ def test_store_roundtrip_full_record(tmp_path: Path) -> None:
 
         got = store.get_session(record.session_id)
         assert got is not None
+        assert got.session_key == record.session_key
+        assert got.root_id == record.root_id
         assert got.session_id == record.session_id
         assert got.path == record.path
         assert got.inode == record.inode
@@ -179,6 +184,93 @@ def test_store_schema_mismatch_raises(tmp_path: Path) -> None:
     with pytest.raises(ProcessedStoreError) as exc_info:
         store.open()
     assert "schema_mismatch" in exc_info.value.code
+
+
+def test_store_migrates_v1_database(tmp_path: Path) -> None:
+    import sqlite3
+
+    db = tmp_path / "codevigil.db"
+    conn = sqlite3.connect(str(db))
+    conn.execute("CREATE TABLE schema_version (version INTEGER PRIMARY KEY)")
+    conn.execute("INSERT INTO schema_version (version) VALUES (1)")
+    conn.execute(
+        """
+        CREATE TABLE processed_sessions (
+            session_id TEXT PRIMARY KEY,
+            path TEXT NOT NULL,
+            inode INTEGER NOT NULL,
+            size INTEGER NOT NULL,
+            offset INTEGER NOT NULL,
+            pending_b64 TEXT NOT NULL DEFAULT '',
+            mtime REAL NOT NULL,
+            project_hash TEXT NOT NULL,
+            project_name TEXT,
+            first_event_time TEXT NOT NULL,
+            last_event_time TEXT NOT NULL,
+            event_count INTEGER NOT NULL,
+            session_task_type TEXT,
+            collector_state_json TEXT NOT NULL DEFAULT '{}',
+            updated_at TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        CREATE TABLE processed_metrics (
+            session_id TEXT NOT NULL,
+            collector_name TEXT NOT NULL,
+            metric_name TEXT NOT NULL,
+            value REAL NOT NULL,
+            severity TEXT NOT NULL,
+            label TEXT NOT NULL,
+            detail_json TEXT,
+            PRIMARY KEY (session_id, collector_name, metric_name)
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO processed_sessions (
+            session_id, path, inode, size, offset, pending_b64, mtime,
+            project_hash, project_name, first_event_time, last_event_time,
+            event_count, session_task_type, collector_state_json, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            "agent-v1",
+            "/tmp/proj/agent-v1.jsonl",
+            1,
+            100,
+            100,
+            "",
+            1712345678.5,
+            "abc123",
+            "Open-ASM",
+            datetime(2026, 1, 1, tzinfo=UTC).isoformat(),
+            datetime(2026, 1, 2, tzinfo=UTC).isoformat(),
+            2,
+            "exploration",
+            "{}",
+            datetime(2026, 1, 2, tzinfo=UTC).isoformat(),
+        ),
+    )
+    conn.execute(
+        """
+        INSERT INTO processed_metrics (
+            session_id, collector_name, metric_name, value, severity, label, detail_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        ("agent-v1", "parse_health", "parse_health", 1.0, "ok", "healthy", None),
+    )
+    conn.commit()
+    conn.close()
+
+    with ProcessedSessionStore(db) as store:
+        got = store.get_session("agent-v1")
+        assert got is not None
+        assert got.root_id == LEGACY_ROOT_ID
+        assert got.session_key == legacy_session_key("agent-v1")
+        assert len(got.metrics) == 1
 
 
 def test_iter_recent_project_aggregates(tmp_path: Path) -> None:

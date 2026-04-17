@@ -1,6 +1,6 @@
 # Collectors
 
-A collector consumes parsed `Event`s, maintains a small amount of internal state, and emits a single `MetricSnapshot` per `snapshot()` call. As of 0.3.0 codevigil ships six collectors. Five are user-facing and configurable via the `enabled` list; the sixth is the always-on integrity gate.
+A collector consumes parsed `Event`s, maintains a small amount of internal state, and emits a single `MetricSnapshot` per `snapshot()` call. The current system ships six collectors. Five are user-facing and configurable via the `enabled` list; the sixth is the always-on integrity gate.
 
 | Collector                             | What it measures                                                               | Severity gated?          | Always on?               |
 | ------------------------------------- | ------------------------------------------------------------------------------ | ------------------------ | ------------------------ |
@@ -11,7 +11,7 @@ A collector consumes parsed `Event`s, maintains a small amount of internal state
 | [`prompts`](#prompts)                 | Cumulative user-turn count per session                                         | No — descriptive counter | No (default enabled)     |
 | [`parse_health`](#parse_health)       | Fraction of input lines successfully parsed in a 50-line drift window          | Yes                      | **Yes — un-disableable** |
 
-`thinking` and `prompts` are descriptive counters added in 0.3.0 for cohort trend analysis at parity with anthropics/claude-code#42796. They have no tunable thresholds; severity is always OK by design. They exist to feed the cohort reducer, not to alarm on a single session.
+`thinking` and `prompts` are descriptive counters for cohort trend analysis at parity with anthropics/claude-code#42796. They have no tunable thresholds; severity is always OK by design. They exist to feed the cohort reducer, not to alarm on a single session.
 
 Each collector is documented below with: what it measures, the metric shape, threshold semantics, severity rules, and what to do when it flips to WARN or CRITICAL.
 

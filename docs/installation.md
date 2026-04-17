@@ -18,6 +18,7 @@ codevigil config check
 ```
 
 `codevigil --version` prints the package version. `codevigil config check` prints the resolved configuration with each value's source — see the output to confirm the install reached the package metadata correctly.
+The first thing to verify is `watch.roots`; that is the canonical watch setting as of multi-root support. If your setup still uses `watch.root` or `CODEVIGIL_WATCH_ROOT`, `config check` will print a deprecation notice while continuing to honor the value.
 
 ### Upgrade
 
@@ -84,8 +85,8 @@ For a full development environment with the lint, type-check, and test toolchain
 The wheel install is exactly two distribution files plus a sdist tarball:
 
 ```text
-codevigil-0.2.0-py3-none-any.whl
-codevigil-0.2.0.tar.gz
+codevigil-0.4.0-py3-none-any.whl
+codevigil-0.4.0.tar.gz
 ```
 
 After installing, confirm the package and its single declared dependency:
