@@ -17,9 +17,9 @@ These apply to every subcommand and must appear before the subcommand name on th
 
 | Subcommand                      | Purpose                                                                                         |
 | ------------------------------- | ----------------------------------------------------------------------------------------------- |
-| [`config check`](#config-check) | Resolve the effective config and print each value with its source.                              |
-| [`ingest`](#ingest)             | Cold-ingest every JSONL under `watch.root` into the persistent processed-session store.         |
-| [`watch`](#watch)               | Live tick loop over `~/.claude/projects` with a terminal dashboard. Project roll-up by default. |
+| [`config check`](#config-check) | Resolve the effective config, print each value with its source, and surface deprecation notices. |
+| [`ingest`](#ingest)             | Cold-ingest every JSONL under `watch.roots` into the persistent processed-session store.         |
+| [`watch`](#watch)               | Live tick loop over one or more watch roots with a terminal dashboard. Project roll-up by default. |
 | [`report`](#report)             | Batch analysis over one or more session files (per-session, cohort, period-compare, or pivot).  |
 | [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                                       |
 | [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap).                     |
@@ -32,12 +32,14 @@ These apply to every subcommand and must appear before the subcommand name on th
 codevigil config check
 ```
 
-Resolves the effective configuration through the precedence chain (defaults → config file → environment → CLI flags) and prints every leaf key with its provenance. Useful for debugging "why is this value what it is".
+Resolves the effective configuration through the precedence chain (defaults → config file → environment → CLI flags) and prints every leaf key with its provenance. Useful for debugging "why is this value what it is". When a deprecated compatibility alias such as `watch.root` or `CODEVIGIL_WATCH_ROOT` was used, `config check` prints a deprecation section ahead of the resolved keys.
 
 ### Output format
 
 ```text
 codevigil config check
+deprecations
+  - CODEVIGIL_WATCH_ROOT is deprecated; use CODEVIGIL_WATCH_ROOTS instead.
   bootstrap.sessions = 10  (default)
   bootstrap.state_path = '~/.local/state/codevigil/bootstrap.json'  (default)
   collectors.enabled = ['read_edit_ratio', 'stop_phrase', 'reasoning_loop']  (default)
@@ -75,13 +77,13 @@ CODEVIGIL_WATCH_POLL_INTERVAL=0.5 codevigil config check
 codevigil ingest [--db PATH] [--force]
 ```
 
-Cold-ingest every JSONL session under `watch.root` into the persistent processed-session store (SQLite). Intended to be run once after install so subsequent `codevigil watch` ticks only process newly-appended events on the hot path. If the store is absent at `codevigil watch` start time, the watch command will invoke the ingest flow automatically — running `ingest` explicitly is only required when you want to force a rebuild or when you want deterministic cold-start timings.
+Cold-ingest every JSONL session under `watch.roots` into the persistent processed-session store (SQLite). Intended to be run once after install so subsequent `codevigil watch` ticks only process newly-appended events on the hot path. If the store is absent at `codevigil watch` start time, the watch command will invoke the ingest flow automatically — running `ingest` explicitly is only required when you want to force a rebuild or when you want deterministic cold-start timings.
 
 ### What it does
 
-1. Resolves config and validates that `watch.root` lies under `$HOME`.
-2. Walks `watch.root` for `*.jsonl` files (up to `watch.max_files`).
-3. For each file: parses end-to-end, runs every enabled collector, and writes one row into the processed store containing session id, file id, final byte offset, serialised collector state, and derived metric summary.
+1. Resolves config and validates that every path in `watch.roots` lies under `$HOME`.
+2. Walks every configured watch root for `*.jsonl` files (up to `watch.max_files` per poll source).
+3. For each file: parses end-to-end, runs every enabled collector, and writes one row into the processed store containing `session_key`, raw `session_id`, file id, final byte offset, serialised collector state, and derived metric summary.
 4. Emits a one-line progress report per file and a final summary: files seen, sessions ingested, sessions skipped (already present), bytes processed.
 
 ### Flags
@@ -113,12 +115,12 @@ codevigil ingest --db /tmp/codevigil-bench.db
 codevigil watch [--by-session]
 ```
 
-Starts the live tick loop. Polls `watch.root` at `watch.poll_interval`, parses new events, runs every enabled collector, and renders a frame to the terminal at `watch.tick_interval`.
+Starts the live tick loop. Polls every configured watch root at `watch.poll_interval`, parses new events, runs every enabled collector, and renders a frame to the terminal at `watch.tick_interval`.
 
 ### What it does
 
 1. Resolves config.
-2. Constructs a `PollingSource` rooted at `watch.root` (default `~/.claude/projects`). Refuses to start if the resolved root is outside `$HOME`.
+2. Constructs one `PollingSource` per resolved entry in `watch.roots` (default `["~/.claude/projects"]`). Refuses to start if any resolved root is outside `$HOME`.
 3. Loads `~/.config/codevigil/projects.toml` if present, for friendly project name resolution.
 4. Constructs a `SessionAggregator` with the bootstrap manager loaded from `bootstrap.state_path`.
 5. Runs the tick loop:
@@ -151,7 +153,8 @@ The watcher seeds each polled file from the persistent cursor cache on startup (
 
 | Key                           | Default                    | Description                                                                                                        |
 | ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `watch.root`                  | `~/.claude/projects`       | Directory to watch for session JSONL files.                                                                        |
+| `watch.roots`                 | `["~/.claude/projects"]`   | Canonical list of directories to watch for session JSONL files.                                                     |
+| `watch.root`                  | `~/.claude/projects`       | Deprecated single-root compatibility alias. Mirrors the first entry in `watch.roots`.                              |
 | `watch.poll_interval`         | `2.0`                      | Seconds between filesystem polls.                                                                                  |
 | `watch.tick_interval`         | `1.0`                      | Seconds between terminal frames.                                                                                   |
 | `watch.display_mode`          | `project`                  | `project` (roll-up) or `session` (per-session blocks). CLI `--by-session` overrides.                               |

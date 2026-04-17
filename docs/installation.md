@@ -18,6 +18,7 @@ codevigil config check
 ```
 
 `codevigil --version` prints the package version. `codevigil config check` prints the resolved configuration with each value's source — see the output to confirm the install reached the package metadata correctly.
+The first thing to verify is `watch.roots`; that is the canonical watch setting as of multi-root support. If your setup still uses `watch.root` or `CODEVIGIL_WATCH_ROOT`, `config check` will print a deprecation notice while continuing to honor the value.
 
 ### Upgrade
 

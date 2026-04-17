@@ -604,7 +604,7 @@ Config loading is fail-loud:
 - **Unknown collector/renderer names** in `enabled` lists abort with the list of known names. Registry is the source of truth.
 - **Out-of-range values** (e.g. `poll_interval = -1`) abort with the allowed range.
 
-A dry-run `codevigil config check` command prints the fully-resolved effective config with each value's source annotated, so users can audit precedence conflicts.
+A dry-run `codevigil config check` command prints the fully-resolved effective config with each value's source annotated, and emits deprecation notices when compatibility aliases such as `watch.root` or `CODEVIGIL_WATCH_ROOT` were used during resolution, so users can audit both precedence conflicts and migration status.
 
 ### Registry Validation
 

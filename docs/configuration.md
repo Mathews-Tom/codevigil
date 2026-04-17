@@ -7,7 +7,7 @@ codevigil resolves its effective configuration through a layered precedence chai
 3. **Environment variables** — `CODEVIGIL_*` bindings (a deliberately small set).
 4. **CLI flags** — highest precedence, override everything else.
 
-Every leaf value carries a provenance string. Run `codevigil config check` to see the resolved value and source for every key.
+Every leaf value carries a provenance string. Run `codevigil config check` to see the resolved value and source for every key. The command also prints deprecation notices when a compatibility alias such as `watch.root` or `CODEVIGIL_WATCH_ROOT` was used during resolution.
 
 Validation is fail-loud: unknown keys, wrong types, out-of-range values, unknown collector or renderer names, and bad output formats all abort startup with a descriptive error message that names the offending key, source layer, and expected type or range.
 
@@ -26,9 +26,10 @@ The default config tree has these top-level sections:
 
 ## `[watch]`
 
-| Key                     | Type    | Default                    | Description                                                                                                                                                                                                                                                                                              |
-| ----------------------- | ------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `root`                  | `str`   | `~/.claude/projects`       | Directory to walk for session JSONL files. Must resolve under `$HOME`.                                                                                                                                                                                                                                   |
+| Key                     | Type        | Default                    | Description                                                                                                                                                                                                                                                                                              |
+| ----------------------- | ----------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `roots`                 | `list[str]` | `["~/.claude/projects"]`   | Canonical list of watch roots. Each path must resolve under `$HOME`. Duplicate paths collapse after `expanduser().resolve()`.                                                                                                                                                                            |
+| `root`                  | `str`       | `~/.claude/projects`       | Deprecated single-root compatibility alias. It resolves to the first entry in `watch.roots` and should not be used in new configs.                                                                                                                                                                      |
 | `poll_interval`         | `float` | `2.0`                      | Seconds between filesystem polls. Range: `[0.05, 3600]`.                                                                                                                                                                                                                                                 |
 | `tick_interval`         | `float` | `1.0`                      | Seconds between aggregator ticks (and terminal frames). Range: `[0.05, 3600]`.                                                                                                                                                                                                                           |
 | `max_files`             | `int`   | `2000`                     | Cap on the number of session files walked per poll. Overflow logs one WARN per run and processes the first N deterministically. Range: `[1, 1_000_000]`.                                                                                                                                                 |
@@ -48,6 +49,15 @@ A session moves through three states: `ACTIVE` → `STALE` → `EVICTED`.
 - `ACTIVE` — receiving events. The terminal renderer shows the session at the top of the dashboard.
 - `STALE` — silent for at least `stale_after_seconds`. Collector state is **preserved** so a quick coffee break does not erase your metric history. A new APPEND flips the session back to ACTIVE.
 - `EVICTED` — silent for at least `evict_after_seconds`. Every collector's `reset()` method is called and the session context is dropped from the aggregator. A new APPEND on the same file id starts a fresh session.
+
+### Multi-root semantics
+
+- `watch.roots` is canonical. Use it for every new config file, even when you only watch one directory.
+- `watch.root` remains readable for backward compatibility. When explicitly set, codevigil mirrors it into `watch.roots = [watch.root]`.
+- When both are present in the same layer, `watch.roots` wins.
+- When both are present in different layers, the higher-precedence layer wins.
+- `CODEVIGIL_WATCH_ROOTS` is the canonical environment override and uses `os.pathsep` splitting.
+- `CODEVIGIL_WATCH_ROOT` remains supported as a deprecated single-root override and maps to `watch.roots = [value]`.
 
 ## `[collectors]`
 
@@ -227,7 +237,7 @@ persistence enabled, writing to /home/user/.local/state/codevigil/sessions/
 
 The session directory is resolved as `$XDG_STATE_HOME/codevigil/sessions/` when `XDG_STATE_HOME` is set, falling back to `~/.local/state/codevigil/sessions/`.
 
-Session reports are written at session eviction time (when a session has been silent for `evict_after_seconds`). Each report is one JSON file named `<session_id>.json`. See `docs/design.md §Session Report Schema` for the full field reference and migration policy.
+Session reports are written at session eviction time (when a session has been silent for `evict_after_seconds`). Each report is one JSON file named `<session_key>.json`, where `session_key = <root_id>:<session_id>`. See `docs/design.md §Session Report Schema` for the full field reference and migration policy.
 
 ### Default behaviour (persistence disabled)
 
@@ -239,8 +249,9 @@ Only the keys in this map can be overridden via the environment. Every other key
 
 | Environment variable             | Maps to                |
 | -------------------------------- | ---------------------- |
+| `CODEVIGIL_WATCH_ROOTS`          | `watch.roots`          |
 | `CODEVIGIL_LOG_PATH`             | `logging.log_path`     |
-| `CODEVIGIL_WATCH_ROOT`           | `watch.root`           |
+| `CODEVIGIL_WATCH_ROOT`           | `watch.root` (deprecated) |
 | `CODEVIGIL_WATCH_POLL_INTERVAL`  | `watch.poll_interval`  |
 | `CODEVIGIL_WATCH_TICK_INTERVAL`  | `watch.tick_interval`  |
 | `CODEVIGIL_WATCH_DISPLAY_LIMIT`  | `watch.display_limit`  |
@@ -248,7 +259,7 @@ Only the keys in this map can be overridden via the environment. Every other key
 | `CODEVIGIL_REPORT_OUTPUT_FORMAT` | `report.output_format` |
 | `CODEVIGIL_BOOTSTRAP_SESSIONS`   | `bootstrap.sessions`   |
 
-Environment values arrive as strings and are coerced against the default's declared type. `CODEVIGIL_WATCH_POLL_INTERVAL=0.5` parses as `float`; `CODEVIGIL_BOOTSTRAP_SESSIONS=20` parses as `int`. Coercion failures raise `ConfigError("config.type_mismatch")`.
+Environment values arrive as strings and are coerced against the default's declared type. `CODEVIGIL_WATCH_POLL_INTERVAL=0.5` parses as `float`; `CODEVIGIL_BOOTSTRAP_SESSIONS=20` parses as `int`. `CODEVIGIL_WATCH_ROOTS` uses `os.pathsep` splitting (`:` on Unix-like systems). Coercion failures raise `ConfigError("config.type_mismatch")`.
 
 ## Validation rules
 
@@ -308,7 +319,7 @@ output_dir = "~/codevigil-reports"
 ### Override everything via the environment
 
 ```bash
-export CODEVIGIL_WATCH_ROOT=~/work/.claude/projects
+export CODEVIGIL_WATCH_ROOTS=~/work/.claude/projects:~/work/other/.claude/projects
 export CODEVIGIL_WATCH_POLL_INTERVAL=0.5
 export CODEVIGIL_REPORT_OUTPUT_DIR=~/work/codevigil-reports
 codevigil watch

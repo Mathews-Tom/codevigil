@@ -35,7 +35,7 @@ codevigil ingest        # one-shot cold-ingest into persistent memory (first run
 codevigil watch         # project roll-up dashboard, resumes every file from its cached cursor
 ```
 
-`codevigil ingest` walks every JSONL under `watch.root`, parses it end-to-end, and writes a durable record (session id, file id, cursor offset, collector state, metric summary) to the local SQLite store under `~/.local/state/codevigil/`. You run it once after install. Subsequent `codevigil watch` ticks seek past the saved cursor on every file, so the hot path only processes newly-appended events. If the store is absent on startup, `watch` will bootstrap it for you.
+`codevigil ingest` walks every JSONL under `watch.roots`, parses them end-to-end, and writes a durable record (root-aware session key, raw session id, file id, cursor offset, collector state, metric summary) to the local SQLite store under `~/.local/state/codevigil/`. You run it once after install. Subsequent `codevigil watch` ticks seek past the saved cursor on every file, so the hot path only processes newly-appended events. If the store is absent on startup, `watch` will bootstrap it for you.
 
 `codevigil watch` then prints a live **project-row** dashboard: one row per Claude Code project, with the fleet-worst severity, the active session count, and the aggregate metric summary. The top line shows fleet totals (session count, CRIT/WARN/OK tallies, project count, last-updated wall-clock tick). Every session's rolling-window collector state is restored from the store so restart does not erase your percentile baselines.
 
@@ -91,12 +91,13 @@ Full flag reference for every subcommand: [docs/cli.md](docs/cli.md).
 
 ## Configuration
 
-codevigil resolves its configuration from a layered precedence chain: built-in defaults → `~/.config/codevigil/config.toml` → `CODEVIGIL_*` environment variables → CLI flags. Run `codevigil config check` to see every resolved key with its source.
+codevigil resolves its configuration from a layered precedence chain: built-in defaults → `~/.config/codevigil/config.toml` → `CODEVIGIL_*` environment variables → CLI flags. `watch.roots` is the canonical multi-root setting; `watch.root` and `CODEVIGIL_WATCH_ROOT` remain supported as deprecated single-root aliases. Run `codevigil config check` to see every resolved key with its source and any deprecation notices.
 
 A minimal `~/.config/codevigil/config.toml`:
 
 ```toml
 [watch]
+roots = ["~/.claude/projects"]
 poll_interval = 1.0
 
 [collectors.read_edit_ratio]
