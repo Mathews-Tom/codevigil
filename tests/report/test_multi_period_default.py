@@ -23,6 +23,7 @@ from pathlib import Path
 
 import pytest
 
+from codevigil.analysis.store import build_report
 from codevigil.cli import main
 from codevigil.report.loader import load_reports_for_windows
 from codevigil.report.renderer import render_multi_period
@@ -287,6 +288,47 @@ class TestMultiPeriodTextOutput:
         assert "Today" in captured.out
         assert "Last 7 days" in captured.out
         assert "Last 30 days" in captured.out
+
+
+def test_render_multi_period_shows_root_labels_for_duplicate_session_ids() -> None:
+    started = datetime(2026, 4, 14, 9, 0, 0, tzinfo=UTC)
+    reports = {
+        "today": [
+            build_report(
+                session_id="shared",
+                session_key="root-a:shared",
+                root_id="root-a",
+                root_label="/tmp/root-a",
+                project_hash="proj-a",
+                project_name=None,
+                model=None,
+                permission_mode=None,
+                started_at=started,
+                ended_at=started + timedelta(minutes=5),
+                event_count=3,
+                parse_confidence=1.0,
+                metrics={"parse_health": 1.0},
+            ),
+            build_report(
+                session_id="shared",
+                session_key="root-b:shared",
+                root_id="root-b",
+                root_label="/tmp/root-b",
+                project_hash="proj-b",
+                project_name=None,
+                model=None,
+                permission_mode=None,
+                started_at=started,
+                ended_at=started + timedelta(minutes=7),
+                event_count=4,
+                parse_confidence=1.0,
+                metrics={"parse_health": 1.0},
+            ),
+        ]
+    }
+    output = render_multi_period(reports)
+    assert "shared (/tmp/root-a)" in output
+    assert "shared (/tmp/root-b)" in output
 
     def test_writes_text_file(
         self,
