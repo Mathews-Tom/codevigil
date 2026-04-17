@@ -5,7 +5,7 @@ Local, privacy-preserving observability for Claude Code sessions.
 codevigil tails `~/.claude/projects/**/*.jsonl` on disk, computes signal metrics about reasoning and tool-use patterns, and surfaces them in a rich terminal dashboard or as JSON / markdown reports. **Zero network egress, no data ever leaves your machine.**
 
 [![Status](https://img.shields.io/badge/status-beta-blue.svg)](https://github.com/Mathews-Tom/codevigil)
-[![Version](https://img.shields.io/badge/version-0.3.0-informational.svg)](CHANGELOG.md)
+[![Version](https://img.shields.io/badge/version-0.4.0-informational.svg)](CHANGELOG.md)
 [![Python](https://img.shields.io/badge/python-3.11%20%7C%203.12-blue.svg)](https://www.python.org/downloads/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-green.svg)](LICENSE)
 [![CI](https://github.com/Mathews-Tom/codevigil/actions/workflows/ci.yml/badge.svg)](https://github.com/Mathews-Tom/codevigil/actions/workflows/ci.yml)
@@ -124,7 +124,7 @@ Five user-facing collectors plus an always-on integrity gate:
 
 ## Persistent memory
 
-0.3.0 adds a local SQLite-backed processed-session store under `~/.local/state/codevigil/processed/`. Every finalised session writes a durable row — session id, file id, cursor byte offset, collector state snapshot, and derived metric summary — and the watcher seeds each polled file from the cached cursor on startup instead of re-parsing JSONL from byte 0. Rolling-window collector state (the `read_edit_ratio` 50-event deque, the `reasoning_loop` burst counter) is restored verbatim across restarts. Run `codevigil ingest` once after install; after that, `codevigil watch` only processes newly-appended events on the hot path. Disable the cursor cache for reproducible cold-start benchmarks with `watch.cursor_cache_enabled = false`. Schema, migration policy, and the invariants the store upholds live in [docs/design.md](docs/design.md).
+0.4.0 adds first-class multi-root support on top of the local SQLite-backed processed-session store under `~/.local/state/codevigil/processed/`. Every finalised session now writes a root-aware identity (`session_key`, raw `session_id`, cursor byte offset, collector state snapshot, and derived metric summary), and the watcher seeds each polled file from the cached cursor on startup instead of re-parsing JSONL from byte 0. Rolling-window collector state (the `read_edit_ratio` 50-event deque, the `reasoning_loop` burst counter) is restored verbatim across restarts, even when different roots contain the same `session_id`. Run `codevigil ingest` once after install; after that, `codevigil watch` only processes newly-appended events on the hot path. Disable the cursor cache for reproducible cold-start benchmarks with `watch.cursor_cache_enabled = false`. Schema, migration policy, and the invariants the store upholds live in [docs/design.md](docs/design.md).
 
 ## Cohort trend reports
 
@@ -141,7 +141,7 @@ Both new default collectors (`thinking`, `prompts`) surface in cohort reports as
 
 ## Task classifier `[experimental]`
 
-0.2.0 adds a turn-level task classifier that labels each Claude Code turn as `exploration`, `mutation_heavy`, `debug_loop`, `planning`, or `mixed` using a two-stage cascade (tool-presence heuristic → keyword regex on the user message, stdlib `re` only, zero network, zero new dependencies). Session-level labels aggregate turn labels by majority vote. Labels surface in four places:
+The experimental task classifier labels each Claude Code turn as `exploration`, `mutation_heavy`, `debug_loop`, `planning`, or `mixed` using a two-stage cascade (tool-presence heuristic → keyword regex on the user message, stdlib `re` only, zero network, zero new dependencies). Session-level labels aggregate turn labels by majority vote. Labels surface in four places:
 
 - **`history list`** — new `task_type` column and `--task-type <label>` filter
 - **`history heatmap --axis task_type`** — cross-tab metrics against task labels

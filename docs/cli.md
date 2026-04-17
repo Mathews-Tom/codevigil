@@ -15,14 +15,14 @@ These apply to every subcommand and must appear before the subcommand name on th
 
 ## Subcommands
 
-| Subcommand                      | Purpose                                                                                         |
-| ------------------------------- | ----------------------------------------------------------------------------------------------- |
-| [`config check`](#config-check) | Resolve the effective config, print each value with its source, and surface deprecation notices. |
-| [`ingest`](#ingest)             | Cold-ingest every JSONL under `watch.roots` into the persistent processed-session store.         |
+| Subcommand                      | Purpose                                                                                            |
+| ------------------------------- | -------------------------------------------------------------------------------------------------- |
+| [`config check`](#config-check) | Resolve the effective config, print each value with its source, and surface deprecation notices.   |
+| [`ingest`](#ingest)             | Cold-ingest every JSONL under `watch.roots` into the persistent processed-session store.           |
 | [`watch`](#watch)               | Live tick loop over one or more watch roots with a terminal dashboard. Project roll-up by default. |
-| [`report`](#report)             | Batch analysis over one or more session files (per-session, cohort, period-compare, or pivot).  |
-| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                                       |
-| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap).                     |
+| [`report`](#report)             | Batch analysis over one or more session files (per-session, cohort, period-compare, or pivot).     |
+| [`export`](#export)             | Stream parsed events as NDJSON on stdout.                                                          |
+| [`history`](#history)           | Retrospective view of stored session reports (list, detail, diff, heatmap).                        |
 
 ---
 
@@ -134,7 +134,7 @@ Starts the live tick loop. Polls every configured watch root at `watch.poll_inte
 
 ### Output
 
-0.3.0 introduces two display modes:
+codevigil supports two display modes:
 
 - **`project` (default)** — one row per Claude Code project, rolling up every active session in that project into the fleet-worst severity, an active session count, and an aggregate metric summary. At most `watch.display_project_limit` rows per frame (default 10).
 - **`session`** — the 0.2.x one-block-per-session layout. At most `watch.display_limit` blocks per frame (default 20). Blocks are ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count and reminds you how to raise the limit.
@@ -153,7 +153,7 @@ The watcher seeds each polled file from the persistent cursor cache on startup (
 
 | Key                           | Default                    | Description                                                                                                        |
 | ----------------------------- | -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `watch.roots`                 | `["~/.claude/projects"]`   | Canonical list of directories to watch for session JSONL files.                                                     |
+| `watch.roots`                 | `["~/.claude/projects"]`   | Canonical list of directories to watch for session JSONL files.                                                    |
 | `watch.root`                  | `~/.claude/projects`       | Deprecated single-root compatibility alias. Mirrors the first entry in `watch.roots`.                              |
 | `watch.poll_interval`         | `2.0`                      | Seconds between filesystem polls.                                                                                  |
 | `watch.tick_interval`         | `1.0`                      | Seconds between terminal frames.                                                                                   |

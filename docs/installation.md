@@ -85,8 +85,8 @@ For a full development environment with the lint, type-check, and test toolchain
 The wheel install is exactly two distribution files plus a sdist tarball:
 
 ```text
-codevigil-0.2.0-py3-none-any.whl
-codevigil-0.2.0.tar.gz
+codevigil-0.4.0-py3-none-any.whl
+codevigil-0.4.0.tar.gz
 ```
 
 After installing, confirm the package and its single declared dependency:

@@ -139,7 +139,7 @@ pip show codevigil
 
 The `Requires` field lists only `rich>=13`. codevigil's runtime imports are stdlib modules plus `rich` — no networking libraries, no subprocess launchers, nothing that could exfiltrate data. `rich` itself makes no network calls.
 
-The 0.2.0 experimental task classifier is implemented on top of stdlib `re` alone. It reads turn text and tool-call names from the already-parsed event stream, applies a two-stage cascade (tool-presence heuristic → keyword regex) entirely in-process, and attaches the resulting label to the in-memory `Turn` and the on-disk `SessionReport`. There is no remote model call, no telemetry, no network handshake, and no new dependency. The privacy guarantees above cover the classifier the same way they cover every other component.
+The experimental task classifier is implemented on top of stdlib `re` alone. It reads turn text and tool-call names from the already-parsed event stream, applies a two-stage cascade (tool-presence heuristic → keyword regex) entirely in-process, and attaches the resulting label to the in-memory `Turn` and the on-disk `SessionReport`. There is no remote model call, no telemetry, no network handshake, and no new dependency. The privacy guarantees above cover the classifier the same way they cover every other component.
 
 ## What to do if you find a violation
 

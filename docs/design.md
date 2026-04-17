@@ -535,7 +535,7 @@ The aggregator maintains a `TurnGrouper` inside each `_SessionContext` as a side
 
 Completed turns are accumulated in `_SessionContext.completed_turns` as immutable `Turn` dataclass instances. Each `Turn` records the session ID, start/end timestamps, the user message text, the ordered sequence of canonical tool names called within the turn, and the total event count. A `task_type: str | None` field is reserved for the Phase 5 classifier; it is always `None` until classification runs.
 
-Collectors continue to receive raw `Event` objects — they do not consume `Turn`. The Turn sidecar is exposed only to the classifier and to `history detail` turn-level display. At session eviction the completed turn list is serialised into `SessionReport.turns` (an optional field, `None` for pre-v0.2.0 records) alongside the existing collector metrics.
+Collectors continue to receive raw `Event` objects — they do not consume `Turn`. The Turn sidecar is exposed only to the classifier and to `history detail` turn-level display. At session eviction the completed turn list is serialised into `SessionReport.turns` (an optional field, `None` for older records) alongside the existing collector metrics.
 
 ### Classifier Layering
 
@@ -821,14 +821,17 @@ The `codevigil history` subcommand family and the `report --group-by` / `report 
 
 The `codevigil/analysis/` package provides offline cohort reduction, period-over-period comparison, and sample-size guards for retrospective session analysis. All components are stdlib-only.
 
-### Session Report Schema (stable, schema_version = 1)
+### Session Report Schema (stable, schema_version = 2)
 
-Every finalised session writes one JSON file to `$XDG_STATE_HOME/codevigil/sessions/<session_id>.json` (falling back to `~/.local/state/codevigil/sessions/` when `XDG_STATE_HOME` is not set). The schema is pinned and stable. Any future field addition increments `schema_version` and ships a one-way migrator in `analysis/store.py::_migrate_record`.
+Every finalised session writes one JSON file to `$XDG_STATE_HOME/codevigil/sessions/<session_key>.json` (falling back to `~/.local/state/codevigil/sessions/` when `XDG_STATE_HOME` is not set). The schema is pinned and stable. Any future field addition increments `schema_version` and ships a one-way migrator in `analysis/store.py::_migrate_record`.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
+  "session_key": "root-abc123:agent-abc123",
   "session_id": "agent-abc123",
+  "root_id": "root-abc123",
+  "root_label": "/Users/me/.claude/projects",
   "project_hash": "abc12345",
   "project_name": null,
   "model": null,
@@ -852,8 +855,11 @@ Field semantics:
 
 | Field              | Type               | Notes                                                                                                                                        |
 | ------------------ | ------------------ | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `schema_version`   | `int`              | Always present. Starts at 1. Increment on any schema change.                                                                                 |
+| `schema_version`   | `int`              | Always present. Current version is 2. Increment on any schema change.                                                                        |
+| `session_key`      | `str`              | Durable root-aware identity of the session. Format: `<root_id>:<session_id>`.                                                                |
 | `session_id`       | `str`              | The JSONL file stem, stable within a session's lifetime.                                                                                     |
+| `root_id`          | `str`              | Deterministic identifier for the configured watch root that produced the session.                                                            |
+| `root_label`       | `str \| null`      | Resolved watch-root path surfaced for report disambiguation when multiple roots are configured.                                              |
 | `project_hash`     | `str`              | Parent directory name under `~/.claude/projects`. Non-empty; falls back to a 16-hex SHA-256 prefix of the raw path for unrecognised layouts. |
 | `project_name`     | `str \| null`      | Human-readable name resolved via `ProjectRegistry`; `null` when unresolved.                                                                  |
 | `model`            | `str \| null`      | Model identifier from session metadata. `null` until Phase 5 wires this field. Cohort group-by on `model` silently excludes null records.    |
