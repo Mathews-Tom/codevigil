@@ -28,6 +28,7 @@ from codevigil.analysis.store import (
     _default_sessions_dir,
     build_report,
 )
+from codevigil.watch_roots import LEGACY_ROOT_ID, make_session_key
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -40,6 +41,9 @@ _T1 = _T0 + timedelta(minutes=30)
 def _make_report(
     session_id: str = "agent-abc123",
     *,
+    session_key: str | None = None,
+    root_id: str | None = None,
+    root_label: str | None = None,
     started_at: datetime | None = None,
     ended_at: datetime | None = None,
     metrics: dict[str, float] | None = None,
@@ -51,6 +55,9 @@ def _make_report(
 ) -> SessionReport:
     return build_report(
         session_id=session_id,
+        session_key=session_key,
+        root_id=root_id,
+        root_label=root_label,
         project_hash=project_hash,
         project_name=None,
         model=model,
@@ -344,6 +351,33 @@ def test_store_get_report_existing(tmp_path: Path) -> None:
     assert r.session_id == "target"
 
 
+def test_store_write_uses_session_key_filename(tmp_path: Path) -> None:
+    store = SessionStore(base_dir=tmp_path)
+    report = _make_report(
+        "shared",
+        session_key=make_session_key("root-a", "shared"),
+        root_id="root-a",
+        root_label="/tmp/root-a",
+    )
+    path = store.write(report)
+    assert path.name == "root-a:shared.json"
+
+
+def test_store_get_report_falls_back_to_session_id_for_root_aware_files(tmp_path: Path) -> None:
+    store = SessionStore(base_dir=tmp_path)
+    report = _make_report(
+        "shared",
+        session_key=make_session_key("root-a", "shared"),
+        root_id="root-a",
+        root_label="/tmp/root-a",
+    )
+    store.write(report)
+    loaded = store.get_report("shared")
+    assert loaded is not None
+    assert loaded.session_key == "root-a:shared"
+    assert loaded.root_id == "root-a"
+
+
 def test_store_get_report_missing_returns_none(tmp_path: Path) -> None:
     store = SessionStore(base_dir=tmp_path / "sessions")
     assert store.get_report("no-such-session") is None
@@ -393,6 +427,9 @@ def test_default_sessions_dir_empty_xdg_falls_back(monkeypatch: pytest.MonkeyPat
 def test_session_report_all_properties() -> None:
     r = _make_report(
         session_id="prop-test",
+        session_key="root-x:prop-test",
+        root_id="root-x",
+        root_label="/tmp/root-x",
         project_hash="phash",
         model="gpt-5",
         permission_mode="default",
@@ -401,6 +438,9 @@ def test_session_report_all_properties() -> None:
         metrics={"r": 3.1, "s": 0.5},
     )
     assert r.session_id == "prop-test"
+    assert r.session_key == "root-x:prop-test"
+    assert r.root_id == "root-x"
+    assert r.root_label == "/tmp/root-x"
     assert r.project_hash == "phash"
     assert r.project_name is None
     assert r.model == "gpt-5"
@@ -460,6 +500,18 @@ def test_from_dict_below_minimum_version_raises() -> None:
     data["schema_version"] = 0  # below _MINIMUM_SUPPORTED_VERSION (1)
     with pytest.raises(MigrationError, match="below the minimum"):
         SessionReport.from_dict(data)
+
+
+def test_from_dict_migrates_v1_root_identity_fields() -> None:
+    data = _make_report().as_dict()
+    data["schema_version"] = 1
+    del data["session_key"]
+    del data["root_id"]
+    del data["root_label"]
+    migrated = SessionReport.from_dict(data)
+    assert migrated.session_key == "agent-abc123"
+    assert migrated.root_id == LEGACY_ROOT_ID
+    assert migrated.root_label is None
 
 
 def test_store_base_dir_property(tmp_path: Path) -> None:

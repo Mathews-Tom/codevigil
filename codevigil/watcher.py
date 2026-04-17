@@ -105,6 +105,7 @@ class SourceEvent:
     timestamp: datetime
     root_id: str = ""
     session_key: str = ""
+    root_label: str = ""
 
 
 @dataclass(slots=True)
@@ -179,6 +180,7 @@ class PollingSource:
         root: Path,
         *,
         root_id: str | None = None,
+        root_label: str | None = None,
         interval: float = 2.0,
         max_files: int = 2000,
         large_file_warn_bytes: int = 10 * 1024 * 1024,
@@ -192,6 +194,7 @@ class PollingSource:
         self._overflow_warned: bool = False
         self._root: Path = self._validate_root(root)
         self._root_id: str = root_id if root_id is not None else make_root_id(self._root)
+        self._root_label: str = root_label if root_label is not None else str(self._root)
         # First-tick instrumentation: log cold-start costs at INFO so users
         # can see where the startup wall-clock went without enabling DEBUG.
         self._first_poll_done: bool = False
@@ -365,6 +368,7 @@ class PollingSource:
                     timestamp=_now(),
                     root_id=self._root_id,
                     session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
 
@@ -463,6 +467,7 @@ class PollingSource:
                     timestamp=_now(),
                     root_id=self._root_id,
                     session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
             self._cursors.pop(path, None)
@@ -479,6 +484,7 @@ class PollingSource:
                     timestamp=_now(),
                     root_id=self._root_id,
                     session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
             self._cursors.pop(path, None)
@@ -535,6 +541,7 @@ class PollingSource:
                     timestamp=mtime_dt,
                     root_id=self._root_id,
                     session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
         if size > start_offset:
@@ -631,6 +638,7 @@ class PollingSource:
                             timestamp=_now(),
                             root_id=self._root_id,
                             session_key=self._session_key_for_path(path),
+                            root_label=self._root_label,
                         )
                     )
             cursor.offset = handle.tell()

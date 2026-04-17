@@ -153,6 +153,7 @@ def _feed_file(
         timestamp=mtime_dt,
         root_id=root.root_id,
         session_key=make_session_key(root.root_id, path.stem),
+        root_label=root.display_name,
     )
     # Private API: the aggregator does not expose a public "ingest one
     # SourceEvent" entry point, so we reach through the private method.
@@ -178,6 +179,7 @@ def _feed_file(
             timestamp=now,
             root_id=root.root_id,
             session_key=make_session_key(root.root_id, path.stem),
+            root_label=root.display_name,
         )
         aggregator._dispatch_source_event(append)
     return bytes_read

@@ -70,13 +70,14 @@ from pathlib import Path
 from typing import Any
 
 from codevigil.turns import Turn
+from codevigil.watch_roots import LEGACY_ROOT_ID
 
 _LOG = logging.getLogger(__name__)
 
 # Current schema version. Increment when adding or removing fields from the
 # session report. Each version bump requires a migration entry in
 # _migrate_record() below.
-CURRENT_SCHEMA_VERSION: int = 1
+CURRENT_SCHEMA_VERSION: int = 2
 
 # Minimum schema version this code can read. Records older than this require
 # a migration that is not yet implemented and will raise MigrationError.
@@ -157,6 +158,19 @@ class SessionReport:
     @property
     def session_id(self) -> str:
         return str(self._data["session_id"])
+
+    @property
+    def session_key(self) -> str:
+        return str(self._data["session_key"])
+
+    @property
+    def root_id(self) -> str:
+        return str(self._data["root_id"])
+
+    @property
+    def root_label(self) -> str | None:
+        v = self._data.get("root_label")
+        return str(v) if v is not None else None
 
     @property
     def project_hash(self) -> str:
@@ -260,6 +274,9 @@ class SessionReport:
 def build_report(
     *,
     session_id: str,
+    session_key: str | None = None,
+    root_id: str | None = None,
+    root_label: str | None = None,
     project_hash: str,
     project_name: str | None,
     model: str | None,
@@ -286,9 +303,14 @@ def build_report(
     ``None`` — no migration is required.
     """
     duration = (ended_at - started_at).total_seconds()
+    resolved_session_key = session_key or session_id
+    resolved_root_id = root_id or LEGACY_ROOT_ID
     data: dict[str, Any] = {
         "schema_version": CURRENT_SCHEMA_VERSION,
         "session_id": session_id,
+        "session_key": resolved_session_key,
+        "root_id": resolved_root_id,
+        "root_label": root_label,
         "project_hash": project_hash,
         "project_name": project_name,
         "model": model,
@@ -342,7 +364,7 @@ class SessionStore:
     # ------------------------------------------------------------------ write
 
     def write(self, report: SessionReport) -> Path:
-        """Persist *report* to ``<base_dir>/<session_id>.json``.
+        """Persist *report* to ``<base_dir>/<session_key>.json``.
 
         Creates the directory on first write. Uses an atomic ``tmp → rename``
         so a partial write never produces a corrupt file. Logs a one-time
@@ -351,13 +373,13 @@ class SessionStore:
         Returns the path of the written file.
         """
         self._ensure_dir()
-        dest = self._base_dir / f"{report.session_id}.json"
+        dest = self._base_dir / f"{report.session_key}.json"
         payload = json.dumps(report.as_dict(), indent=2, ensure_ascii=False) + "\n"
 
         # Atomic write: write to a sibling temp file, then rename.
         fd, tmp_path_str = tempfile.mkstemp(
             dir=self._base_dir,
-            prefix=f".{report.session_id}.",
+            prefix=f".{report.session_key}.",
             suffix=".tmp",
         )
         tmp_path = Path(tmp_path_str)
@@ -407,17 +429,29 @@ class SessionStore:
         reports.sort(key=lambda r: r.started_at)
         return reports
 
-    def get_report(self, session_id: str) -> SessionReport | None:
-        """Load a single report by session_id. Returns ``None`` if absent."""
-        path = self._base_dir / f"{session_id}.json"
-        if not path.exists():
+    def get_report(self, identifier: str) -> SessionReport | None:
+        """Load a single report by session_key or legacy session_id."""
+        path = self._base_dir / f"{identifier}.json"
+        if path.exists():
+            try:
+                raw = json.loads(path.read_text(encoding="utf-8"))
+                return SessionReport.from_dict(raw)
+            except (OSError, json.JSONDecodeError, MigrationError, StoreError) as exc:
+                _LOG.warning("failed to load session report %s: %s", identifier, exc)
+                return None
+        if not self._base_dir.exists():
             return None
-        try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-            return SessionReport.from_dict(raw)
-        except (OSError, json.JSONDecodeError, MigrationError, StoreError) as exc:
-            _LOG.warning("failed to load session report %s: %s", session_id, exc)
-            return None
+        for candidate in self._base_dir.iterdir():
+            if candidate.suffix != ".json" or candidate.stem.startswith("."):
+                continue
+            try:
+                raw = json.loads(candidate.read_text(encoding="utf-8"))
+                report = SessionReport.from_dict(raw)
+            except (OSError, json.JSONDecodeError, MigrationError, StoreError):
+                continue
+            if report.session_id == identifier or report.session_key == identifier:
+                return report
+        return None
 
     # ------------------------------------------------------------------ internals
 
@@ -454,9 +488,11 @@ def _migrate_record(record: dict[str, Any], *, from_version: int) -> dict[str, A
     result = dict(record)
     version = from_version
     # Future migrations slot in here as ``if version < N:`` blocks:
-    # if version < 2:
-    #     result["new_field"] = None
-    #     version = 2
+    if version < 2:
+        result["session_key"] = str(result.get("session_id", ""))
+        result["root_id"] = LEGACY_ROOT_ID
+        result["root_label"] = None
+        version = 2
     result["schema_version"] = CURRENT_SCHEMA_VERSION
     _ = version  # suppress "variable assigned but never used" when no migrations exist
     return result
@@ -469,6 +505,8 @@ def _migrate_record(record: dict[str, Any], *, from_version: int) -> dict[str, A
 _REQUIRED_FIELDS: tuple[str, ...] = (
     "schema_version",
     "session_id",
+    "session_key",
+    "root_id",
     "project_hash",
     "started_at",
     "ended_at",

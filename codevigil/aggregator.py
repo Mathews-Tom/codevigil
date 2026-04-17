@@ -126,6 +126,7 @@ class _SessionContext:
     session_id: str
     session_key: str
     root_id: str
+    root_label: str
     file_path: Path
     project_hash: str
     parser: SessionParser
@@ -456,6 +457,7 @@ class SessionAggregator:
             session_id=sid,
             session_key=session_key,
             root_id=source_event.root_id or LEGACY_ROOT_ID,
+            root_label=source_event.root_label or str(source_event.path.parent),
             file_path=source_event.path,
             project_hash=project_hash,
             parser=parser,
@@ -842,6 +844,9 @@ class SessionAggregator:
             state=ctx.state,
             snapshot_history=history,
             session_task_type=current_task_type,
+            session_key=ctx.session_key,
+            root_id=ctx.root_id,
+            root_label=ctx.root_label,
         )
 
     # ----------------------------------------------------------------- lifecycle
@@ -930,6 +935,9 @@ class SessionAggregator:
         try:
             report = build_report(
                 session_id=ctx.session_id,
+                session_key=ctx.session_key,
+                root_id=ctx.root_id,
+                root_label=ctx.root_label,
                 project_hash=ctx.project_hash,
                 project_name=self._project_registry.resolve(ctx.project_hash),
                 model=None,  # Phase 5 wires model from session metadata
