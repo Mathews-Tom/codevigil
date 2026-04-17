@@ -178,17 +178,23 @@ class _SessionView:
             return matches[0]
         return None
 
-    def __getitem__(self, key: str) -> _SessionContext:
+    def _get_resolved(self, key: str) -> _SessionContext | None:
         resolved = self._resolve_key(key)
         if resolved is None:
-            raise KeyError(key)
+            return None
         return self._sessions[resolved]
 
+    def __getitem__(self, key: str) -> _SessionContext:
+        ctx = self._get_resolved(key)
+        if ctx is None:
+            raise KeyError(key)
+        return ctx
+
     def get(self, key: str, default: Any = None) -> _SessionContext | Any:
-        resolved = self._resolve_key(key)
-        if resolved is None:
+        ctx = self._get_resolved(key)
+        if ctx is None:
             return default
-        return self._sessions[resolved]
+        return ctx
 
     def pop(self, key: str, default: Any = None) -> _SessionContext | Any:
         resolved = self._resolve_key(key)
