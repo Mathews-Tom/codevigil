@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
 
-from codevigil.config import ConfigError, load_config
+from codevigil.config import ConfigError, load_config, resolve_watch_roots
 
 
 def _write_config(path: Path, body: str) -> Path:
@@ -192,6 +193,41 @@ def test_empty_watch_roots_env_rejected() -> None:
             cli_overrides={},
         )
     assert exc.value.code == "config.empty_watch_roots"
+
+
+def test_resolve_watch_roots_deduplicates_equivalent_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    root = tmp_path / ".claude" / "projects"
+    root.mkdir(parents=True)
+    cfg = load_config(
+        config_path=None,
+        env={"CODEVIGIL_WATCH_ROOTS": f"{root}{os.pathsep}{root / '..' / 'projects'}"},
+        cli_overrides={},
+    )
+    descriptors = resolve_watch_roots(cfg.values)
+    assert len(descriptors) == 1
+    assert descriptors[0].root_path == root.resolve()
+
+
+def test_resolve_watch_roots_rejects_path_outside_home(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    cfg = load_config(
+        config_path=None,
+        env={"CODEVIGIL_WATCH_ROOT": str(outside)},
+        cli_overrides={},
+    )
+    with pytest.raises(ConfigError) as exc:
+        resolve_watch_roots(cfg.values)
+    assert exc.value.code == "config.watch_root_scope_violation"
 
 
 # ---------------------------------------------------------------------------

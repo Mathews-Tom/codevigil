@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any
 
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource
+from codevigil.watch_roots import RootDescriptor, describe_root
 
 # ---------------------------------------------------------------------------
 # Defaults
@@ -845,6 +846,37 @@ def _validate_watch_roots(values: dict[str, Any]) -> None:
         )
 
 
+def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
+    """Return deduplicated, validated watch roots in configuration order."""
+
+    raw_roots = _read_dotted(values, "watch.roots")
+    home = Path.home().resolve()
+    descriptors: list[RootDescriptor] = []
+    seen_paths: set[Path] = set()
+    for raw in raw_roots:
+        path = Path(str(raw)).expanduser().resolve()
+        if not path.is_relative_to(home):
+            raise ConfigError(
+                code="config.watch_root_scope_violation",
+                message=(
+                    f"watch root {str(path)!r} is outside the user home directory "
+                    f"{str(home)!r}"
+                ),
+                context={"root": str(path), "home": str(home)},
+            )
+        if path in seen_paths:
+            continue
+        seen_paths.add(path)
+        descriptors.append(describe_root(path))
+    if not descriptors:
+        raise ConfigError(
+            code="config.empty_watch_roots",
+            message="watch.roots must contain at least one path",
+            context={"key": "watch.roots"},
+        )
+    return descriptors
+
+
 def _format_value(value: Any) -> str:
     if isinstance(value, str):
         return repr(value)
@@ -859,5 +891,6 @@ __all__ = [
     "ResolvedConfig",
     "ResolvedValue",
     "load_config",
+    "resolve_watch_roots",
     "render_config_check",
 ]

@@ -14,6 +14,7 @@ from pathlib import Path
 
 _ROOT_HASH_BYTES: int = 12
 _SESSION_KEY_SEPARATOR: str = ":"
+LEGACY_ROOT_ID: str = "root-legacy"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,12 @@ def make_session_key(root_id: str, session_id: str) -> str:
     return f"{root_id}{_SESSION_KEY_SEPARATOR}{session_id}"
 
 
+def legacy_session_key(session_id: str) -> str:
+    """Return the deterministic session key for migrated single-root rows."""
+
+    return make_session_key(LEGACY_ROOT_ID, session_id)
+
+
 def split_session_key(session_key: str) -> tuple[str, str]:
     """Split a composed session key back into ``(root_id, session_id)``."""
 
@@ -70,9 +77,11 @@ def split_session_key(session_key: str) -> tuple[str, str]:
 
 
 __all__ = [
+    "LEGACY_ROOT_ID",
     "RootDescriptor",
     "describe_root",
     "describe_roots",
+    "legacy_session_key",
     "make_root_id",
     "make_session_key",
     "split_session_key",
