@@ -12,6 +12,7 @@ from pathlib import Path
 
 from codevigil.analysis.store import SessionStore, build_report
 from codevigil.history.diff_cmd import _render_diff, run_diff
+from codevigil.watch_roots import make_session_key
 
 
 def _write_session(
@@ -131,6 +132,27 @@ class TestRunDiff:
         run_diff("agent-det1", "agent-det2", store_dir=tmp_path, out=out1)
         run_diff("agent-det1", "agent-det2", store_dir=tmp_path, out=out2)
         assert out1.getvalue() == out2.getvalue()
+
+    def test_ambiguous_session_id_returns_1(self, tmp_path: Path) -> None:
+        store = SessionStore(base_dir=tmp_path)
+        _write_session(
+            store,
+            "shared",
+            metrics={"stop_phrase": 1.0},
+            session_key=make_session_key("root-a", "shared"),
+            root_id="root-a",
+        )
+        _write_session(
+            store,
+            "shared",
+            metrics={"stop_phrase": 2.0},
+            session_key=make_session_key("root-b", "shared"),
+            root_id="root-b",
+        )
+        out = io.StringIO()
+        code = run_diff("shared", "shared", store_dir=tmp_path, out=out)
+        assert code == 1
+        assert "use the full session_key" in out.getvalue()
 
 
 class TestRenderDiff:

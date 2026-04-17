@@ -179,12 +179,16 @@ class _SessionBlock:
     # Session header line and metric table built during render().
     session_header: rich.text.Text | None = None
     metric_table: rich.table.Table | None = None
+    meta: SessionMeta | None = None
     # WARN/ERROR footers — appear below the metric table.
     footer_items: list[rich.text.Text] = field(default_factory=list)
 
     severity_rank: int = _SEVERITY_RANK[Severity.OK]
     updated_at_ts: float = 0.0
+    session_key: str = ""
     session_id: str = ""
+    root_id: str = ""
+    root_label: str = ""
     updated_dt: datetime | None = None
     project_key: str = ""
     # Raw snapshots retained so the project-row view can roll up
@@ -294,8 +298,12 @@ class TerminalRenderer:
         # Rebuild label map when fleet composition changes.
         current_ids = frozenset(self._blocks)
         if current_ids != self._label_fleet:
-            self._label_map = _build_label_map(list(current_ids))
+            self._label_map = _build_label_map(self._blocks)
             self._label_fleet = current_ids
+        show_root = self._should_show_root_labels()
+        for block in self._blocks.values():
+            if block.meta is not None:
+                block.session_header = self._session_header_text(block.meta, show_root=show_root)
 
         self._update_fleet_counters()
 
@@ -352,12 +360,17 @@ class TerminalRenderer:
 
     def render(self, snapshots: list[MetricSnapshot], meta: SessionMeta) -> None:
         """Buffer one session's block for the current tick."""
-        block = self._blocks.get(meta.session_id)
+        block_key = meta.session_key or meta.session_id
+        block = self._blocks.get(block_key)
         if block is None:
             block = _SessionBlock()
-            self._blocks[meta.session_id] = block
-            self._order.append(meta.session_id)
+            self._blocks[block_key] = block
+            self._order.append(block_key)
+        block.session_key = block_key
         block.session_id = meta.session_id
+        block.root_id = meta.root_id or ""
+        block.root_label = meta.root_label or ""
+        block.meta = meta
 
         ok_rank = _SEVERITY_RANK[Severity.OK]
         block.severity_rank = min(
@@ -374,7 +387,6 @@ class TerminalRenderer:
         )
 
         block.snapshots = list(snapshots)
-        block.session_header = self._session_header_text(meta)
         block.metric_table = self._build_metric_table(snapshots, meta)
 
     def render_error(self, err: CodevigilError, meta: SessionMeta | None) -> None:
@@ -386,12 +398,12 @@ class TerminalRenderer:
         if err.level is ErrorLevel.INFO:
             return
 
-        session_id = meta.session_id if meta is not None else ""
-        block = self._blocks.get(session_id)
+        block_key = meta.session_key or meta.session_id if meta is not None else ""
+        block = self._blocks.get(block_key)
         if block is None:
             block = _SessionBlock()
-            self._blocks[session_id] = block
-            self._order.append(session_id)
+            self._blocks[block_key] = block
+            self._order.append(block_key)
 
         text_content = f"{err.code}: {err.message}"
         if err.level is ErrorLevel.WARN:
@@ -733,8 +745,16 @@ class TerminalRenderer:
         )
         return t
 
-    def _session_header_text(self, meta: SessionMeta) -> rich.text.Text:
-        label = self._label_map.get(meta.session_id, meta.session_id[:_MIN_PREFIX])
+    def _should_show_root_labels(self) -> bool:
+        root_ids = {block.root_id for block in self._blocks.values() if block.root_id}
+        if len(root_ids) > 1:
+            return True
+        session_ids = [block.session_id for block in self._blocks.values()]
+        return len(session_ids) != len(set(session_ids))
+
+    def _session_header_text(self, meta: SessionMeta, *, show_root: bool) -> rich.text.Text:
+        label_key = meta.session_key or meta.session_id
+        label = self._label_map.get(label_key, meta.session_id[:_MIN_PREFIX])
         project = meta.project_name or meta.project_hash[:8]
         duration = _format_duration((meta.last_event_time - meta.start_time).total_seconds())
         state_word = _STATE_WORD[meta.state]
@@ -743,6 +763,8 @@ class TerminalRenderer:
         t = rich.text.Text()
         t.append(f"session: {label} | project: {project} | {duration} ")
         t.append(state_word, style=state_style)
+        if show_root and meta.root_label:
+            t.append(f" | root: {meta.root_label}", style=_DIM_STYLE)
 
         # Append task type tag right-aligned when the classifier is enabled
         # and a task type is available. Suppressed when session_task_type is
@@ -888,25 +910,29 @@ class TerminalRenderer:
 # ---------------------------------------------------------------------------
 
 
-def _build_label_map(session_ids: list[str]) -> dict[str, str]:
+def _build_label_map(blocks: dict[str, _SessionBlock] | list[str]) -> dict[str, str]:
     """Build a stable label map with adaptive prefix length."""
-    if not session_ids:
+    if not blocks:
         return {}
+    if isinstance(blocks, list):
+        session_ids = {session_id: session_id for session_id in blocks}
+    else:
+        session_ids = {key: block.session_id for key, block in blocks.items()}
     prefix_len = _MIN_PREFIX
-    max_len = max(len(sid) for sid in session_ids)
+    max_len = max(len(session_id) for session_id in session_ids.values())
     while prefix_len <= max_len:
-        candidate: dict[str, str] = {sid: sid[:prefix_len] for sid in session_ids}
+        candidate = {key: session_id[:prefix_len] for key, session_id in session_ids.items()}
         labels = list(candidate.values())
         if len(labels) == len(set(labels)):
             return candidate
         prefix_len += 1
     result: dict[str, str] = {}
     seen: dict[str, int] = {}
-    for sid in sorted(session_ids):
-        base = sid[:max_len]
+    for key in sorted(session_ids):
+        base = session_ids[key][:max_len]
         count = seen.get(base, 0)
         seen[base] = count + 1
-        result[sid] = base if count == 0 else f"{base}~{count}"
+        result[key] = base if count == 0 else f"{base}~{count}"
     return result
 
 

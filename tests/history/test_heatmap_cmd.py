@@ -8,6 +8,7 @@ from pathlib import Path
 
 from codevigil.analysis.store import SessionStore, build_report
 from codevigil.history.heatmap_cmd import run_heatmap
+from codevigil.watch_roots import make_session_key
 
 
 def _write_session(store: SessionStore, session_id: str, **kwargs: object) -> None:
@@ -69,3 +70,22 @@ class TestHeatmapPresent:
         # Numeric metric values must not appear as raw decimal strings.
         assert "4.0000" not in text
         assert "0.0000" not in text
+
+    def test_ambiguous_session_id_returns_1(self, tmp_path: Path) -> None:
+        store = SessionStore(base_dir=tmp_path)
+        _write_session(
+            store,
+            "shared",
+            session_key=make_session_key("root-a", "shared"),
+            root_id="root-a",
+        )
+        _write_session(
+            store,
+            "shared",
+            session_key=make_session_key("root-b", "shared"),
+            root_id="root-b",
+        )
+        out = io.StringIO()
+        code = run_heatmap("shared", store_dir=tmp_path, out=out)
+        assert code == 1
+        assert "use the full session_key" in out.getvalue()

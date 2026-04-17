@@ -31,7 +31,7 @@ from typing import Any
 import rich.console
 import rich.table
 
-from codevigil.analysis.store import SessionReport, SessionStore
+from codevigil.analysis.store import AmbiguousSessionError, SessionReport, SessionStore
 from codevigil.history.filters import (
     format_duration,
     format_started_at,
@@ -61,8 +61,12 @@ def run_diff(
         out = sys.stdout
 
     store = SessionStore(base_dir=store_dir)
-    report_a = store.get_report(session_id_a)
-    report_b = store.get_report(session_id_b)
+    try:
+        report_a = store.get_report(session_id_a)
+        report_b = store.get_report(session_id_b)
+    except AmbiguousSessionError as exc:
+        out.write(f"{exc}\n")
+        return 1
 
     missing: list[str] = []
     if report_a is None:

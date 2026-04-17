@@ -23,6 +23,7 @@ from codevigil.renderers.terminal import (
     _format_trend,
 )
 from codevigil.types import MetricSnapshot, SessionMeta, SessionState, Severity
+from codevigil.watch_roots import make_session_key
 from tests.renderers._fixtures import make_meta, make_snapshots
 
 # ---------------------------------------------------------------------------
@@ -272,6 +273,37 @@ def test_label_stable_across_ticks() -> None:
     label_tick2 = tick2_only[label_start2:label_end2]
 
     assert label_tick1 == label_tick2
+
+
+def test_duplicate_session_ids_render_as_distinct_blocks_with_root_labels() -> None:
+    stream = io.StringIO()
+    renderer = TerminalRenderer(stream=stream, use_color=False)
+
+    renderer.begin_tick()
+    renderer.render(
+        make_snapshots(),
+        make_meta(
+            session_id="shared",
+            session_key=make_session_key("root-a", "shared"),
+            root_id="root-a",
+            root_label="/tmp/root-a",
+        ),
+    )
+    renderer.render(
+        make_snapshots(),
+        make_meta(
+            session_id="shared",
+            session_key=make_session_key("root-b", "shared"),
+            root_id="root-b",
+            root_label="/tmp/root-b",
+        ),
+    )
+    renderer.end_tick()
+
+    out = stream.getvalue()
+    assert out.count("session: shared") == 2
+    assert "root: /tmp/root-a" in out
+    assert "root: /tmp/root-b" in out
 
 
 # ---------------------------------------------------------------------------

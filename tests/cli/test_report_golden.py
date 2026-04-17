@@ -93,3 +93,112 @@ def test_report_date_filter_drops_out_of_range_sessions(
     exit_code = main(["report", str(fixture), "--from", "2027-01-01", "--format", "json"])
     assert exit_code == 0
     assert capsys.readouterr().out == ""
+
+
+def test_report_json_includes_root_identity_for_duplicate_session_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = _setup_home(tmp_path, monkeypatch)
+    root_a = home / ".claude" / "projects-a"
+    root_b = home / ".claude" / "projects-b"
+    root_a.mkdir(parents=True)
+    root_b.mkdir(parents=True)
+    write_fixture_session(root_a / "shared.jsonl", session_id="shared")
+    write_fixture_session(root_b / "shared.jsonl", session_id="shared")
+    config_path = home / "codevigil.toml"
+    config_path.write_text(
+        f"[watch]\nroots = [{str(root_a)!r}, {str(root_b)!r}]\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "report",
+            str(home / ".claude"),
+            "--format",
+            "json",
+            "--from",
+            "2020-01-01",
+        ]
+    )
+    assert exit_code == 0
+
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines() if line.strip()]
+    assert len(records) == 2
+    assert {record["session_id"] for record in records} == {"shared"}
+    assert {record["root_label"] for record in records} == {str(root_a), str(root_b)}
+    assert all(record["session_key"].endswith(":shared") for record in records)
+    assert len({record["session_key"] for record in records}) == 2
+
+
+def test_report_markdown_includes_root_label_for_duplicate_session_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = _setup_home(tmp_path, monkeypatch)
+    root_a = home / ".claude" / "projects-a"
+    root_b = home / ".claude" / "projects-b"
+    root_a.mkdir(parents=True)
+    root_b.mkdir(parents=True)
+    write_fixture_session(root_a / "shared.jsonl", session_id="shared")
+    write_fixture_session(root_b / "shared.jsonl", session_id="shared")
+    config_path = home / "codevigil.toml"
+    config_path.write_text(
+        f"[watch]\nroots = [{str(root_a)!r}, {str(root_b)!r}]\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "report",
+            str(home / ".claude"),
+            "--format",
+            "markdown",
+            "--from",
+            "2020-01-01",
+        ]
+    )
+    assert exit_code == 0
+
+    out = capsys.readouterr().out
+    assert "## session `shared (" in out
+    assert f"- root: `{root_a}`" in out
+    assert f"- root: `{root_b}`" in out
+
+
+def test_report_rejects_invalid_watch_root_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = _setup_home(tmp_path, monkeypatch)
+    fixture = write_fixture_session(home / "session.jsonl")
+    outside_root = tmp_path / "outside-root"
+    outside_root.mkdir()
+    config_path = home / "codevigil.toml"
+    config_path.write_text(
+        f"[watch]\nroots = [{str(outside_root)!r}]\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "report",
+            str(fixture),
+            "--format",
+            "json",
+            "--from",
+            "2020-01-01",
+        ]
+    )
+    assert exit_code == 2
+    assert "config.watch_root_scope_violation" in capsys.readouterr().err

@@ -16,6 +16,9 @@ def make_meta(
     duration_s: float = 154.0,
     parse_confidence: float = 1.0,
     session_task_type: str | None = None,
+    session_key: str | None = None,
+    root_id: str | None = None,
+    root_label: str | None = None,
 ) -> SessionMeta:
     start = datetime(2026, 4, 13, 12, 0, 0, tzinfo=UTC)
     return SessionMeta(
@@ -29,6 +32,9 @@ def make_meta(
         parse_confidence=parse_confidence,
         state=state,
         session_task_type=session_task_type,
+        session_key=session_key,
+        root_id=root_id,
+        root_label=root_label,
     )
 
 

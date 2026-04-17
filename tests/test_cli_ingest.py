@@ -10,6 +10,7 @@ import pytest
 
 from codevigil.analysis.processed_store import ProcessedSessionStore, default_db_path
 from codevigil.cli import main
+from codevigil.config import load_config, resolve_watch_roots
 
 
 def _setup_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
@@ -29,6 +30,29 @@ def _write_session_file(
     age_seconds: float = 0.0,
 ) -> Path:
     sessions = home / ".claude" / "projects" / project / "sessions"
+    sessions.mkdir(parents=True, exist_ok=True)
+    path = sessions / f"{session_id}.jsonl"
+    path.write_text(
+        '{"type":"user","timestamp":"2025-11-01T10:00:00Z",'
+        '"message":{"id":"u1","content":[{"type":"text","text":"hi"}]}}\n'
+        '{"type":"assistant","timestamp":"2025-11-01T10:00:05Z",'
+        '"message":{"id":"a1","content":[{"type":"text","text":"yo"}]}}\n',
+        encoding="utf-8",
+    )
+    if age_seconds > 0:
+        target = time.time() - age_seconds
+        os.utime(path, (target, target))
+    return path
+
+
+def _write_session_file_under_root(
+    root: Path,
+    *,
+    project: str,
+    session_id: str,
+    age_seconds: float = 0.0,
+) -> Path:
+    sessions = root / project / "sessions"
     sessions.mkdir(parents=True, exist_ok=True)
     path = sessions / f"{session_id}.jsonl"
     path.write_text(
@@ -163,3 +187,39 @@ def test_watch_auto_ingests_when_db_missing(
 
     with ProcessedSessionStore(default_db_path()) as store:
         assert store.get_session("agent-1") is not None
+
+
+def test_ingest_multi_root_preserves_colliding_session_ids(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("CODEVIGIL_LOG_PATH", str(home / "codevigil.log"))
+    root_a = home / ".claude" / "projects-a"
+    root_b = home / ".claude" / "projects-b"
+    monkeypatch.setenv(
+        "CODEVIGIL_WATCH_ROOTS",
+        f"{root_a}{os.pathsep}{root_b}",
+    )
+    _write_session_file_under_root(root_a, project="ProjA", session_id="shared")
+    _write_session_file_under_root(root_b, project="ProjB", session_id="shared")
+
+    exit_code = main(["ingest"])
+    assert exit_code == 0
+
+    resolved = load_config(config_path=None, env=dict(os.environ), cli_overrides={})
+    roots = resolve_watch_roots(resolved.values)
+    assert len(roots) == 2
+
+    with ProcessedSessionStore(default_db_path()) as store:
+        first = store.get_session("shared", root_id=roots[0].root_id)
+        second = store.get_session("shared", root_id=roots[1].root_id)
+        all_records = list(store.iter_all())
+
+    assert first is not None
+    assert second is not None
+    assert first.session_key != second.session_key
+    assert first.path != second.path
+    assert len(all_records) == 2

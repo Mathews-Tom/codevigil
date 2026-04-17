@@ -7,7 +7,7 @@ codevigil resolves its effective configuration through a layered precedence chai
 3. **Environment variables** — `CODEVIGIL_*` bindings (a deliberately small set).
 4. **CLI flags** — highest precedence, override everything else.
 
-Every leaf value carries a provenance string. Run `codevigil config check` to see the resolved value and source for every key.
+Every leaf value carries a provenance string. Run `codevigil config check` to see the resolved value and source for every key. The command also prints deprecation notices when a compatibility alias such as `watch.root` or `CODEVIGIL_WATCH_ROOT` was used during resolution.
 
 Validation is fail-loud: unknown keys, wrong types, out-of-range values, unknown collector or renderer names, and bad output formats all abort startup with a descriptive error message that names the offending key, source layer, and expected type or range.
 
@@ -26,20 +26,21 @@ The default config tree has these top-level sections:
 
 ## `[watch]`
 
-| Key                     | Type    | Default                    | Description                                                                                                                                                                                                                                                                                              |
-| ----------------------- | ------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `root`                  | `str`   | `~/.claude/projects`       | Directory to walk for session JSONL files. Must resolve under `$HOME`.                                                                                                                                                                                                                                   |
-| `poll_interval`         | `float` | `2.0`                      | Seconds between filesystem polls. Range: `[0.05, 3600]`.                                                                                                                                                                                                                                                 |
-| `tick_interval`         | `float` | `1.0`                      | Seconds between aggregator ticks (and terminal frames). Range: `[0.05, 3600]`.                                                                                                                                                                                                                           |
-| `max_files`             | `int`   | `2000`                     | Cap on the number of session files walked per poll. Overflow logs one WARN per run and processes the first N deterministically. Range: `[1, 1_000_000]`.                                                                                                                                                 |
-| `large_file_warn_bytes` | `int`   | `10 * 1024 * 1024`         | Per-poll growth above this triggers a single WARN per file per run. Range: `[1024, 10**12]`.                                                                                                                                                                                                             |
-| `stale_after_seconds`   | `int`   | `300`                      | A session silent for this long transitions to STALE. Collector state is preserved. Range: `[1, 86400]`.                                                                                                                                                                                                  |
-| `evict_after_seconds`   | `int`   | `2100`                     | A session silent for this long is EVICTED. `reset()` is called on every collector and the cursor is dropped. Must be strictly greater than `stale_after_seconds`. Range: `[1, 86400]`.                                                                                                                   |
-| `display_mode`          | `str`   | `"project"`                | Watch dashboard layout. `"project"` rolls every active session in a project into a single row with fleet-worst severity, active count, and aggregate metric summary. `"session"` renders the 0.2.x one-block-per-session layout. The `--by-session` CLI flag forces `"session"` for a single invocation. |
-| `display_limit`         | `int`   | `20`                       | Max session blocks rendered per frame in `"session"` mode. Ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`.                                                                       |
-| `display_project_limit` | `int`   | `10`                       | Max project rows rendered per frame in `"project"` mode. Ranked by fleet-worst severity then most-recent activity.                                                                                                                                                                                       |
-| `cursor_cache_enabled`  | `bool`  | `true`                     | Seed each polled file from its last saved byte offset on startup instead of re-reading from byte 0. Disable for fully reproducible cold-start benchmarks.                                                                                                                                                |
-| `cursor_cache_dir`      | `str`   | `~/.local/state/codevigil` | Directory that holds the persistent cursor cache. Must resolve under `$HOME`.                                                                                                                                                                                                                            |
+| Key                     | Type        | Default                    | Description                                                                                                                                                                                                                                                                                              |
+| ----------------------- | ----------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `roots`                 | `list[str]` | `["~/.claude/projects"]`   | Canonical list of watch roots. Each path must resolve under `$HOME`. Duplicate paths collapse after `expanduser().resolve()`.                                                                                                                                                                            |
+| `root`                  | `str`       | `~/.claude/projects`       | Deprecated single-root compatibility alias. It resolves to the first entry in `watch.roots` and should not be used in new configs.                                                                                                                                                                       |
+| `poll_interval`         | `float`     | `2.0`                      | Seconds between filesystem polls. Range: `[0.05, 3600]`.                                                                                                                                                                                                                                                 |
+| `tick_interval`         | `float`     | `1.0`                      | Seconds between aggregator ticks (and terminal frames). Range: `[0.05, 3600]`.                                                                                                                                                                                                                           |
+| `max_files`             | `int`       | `2000`                     | Cap on the number of session files walked per poll. Overflow logs one WARN per run and processes the first N deterministically. Range: `[1, 1_000_000]`.                                                                                                                                                 |
+| `large_file_warn_bytes` | `int`       | `10 * 1024 * 1024`         | Per-poll growth above this triggers a single WARN per file per run. Range: `[1024, 10**12]`.                                                                                                                                                                                                             |
+| `stale_after_seconds`   | `int`       | `300`                      | A session silent for this long transitions to STALE. Collector state is preserved. Range: `[1, 86400]`.                                                                                                                                                                                                  |
+| `evict_after_seconds`   | `int`       | `2100`                     | A session silent for this long is EVICTED. `reset()` is called on every collector and the cursor is dropped. Must be strictly greater than `stale_after_seconds`. Range: `[1, 86400]`.                                                                                                                   |
+| `display_mode`          | `str`       | `"project"`                | Watch dashboard layout. `"project"` rolls every active session in a project into a single row with fleet-worst severity, active count, and aggregate metric summary. `"session"` renders the 0.2.x one-block-per-session layout. The `--by-session` CLI flag forces `"session"` for a single invocation. |
+| `display_limit`         | `int`       | `20`                       | Max session blocks rendered per frame in `"session"` mode. Ranked by severity then recency. When the active set exceeds the cap, a footer line reports the omitted count. Range: `[1, 500]`. Env: `CODEVIGIL_WATCH_DISPLAY_LIMIT`.                                                                       |
+| `display_project_limit` | `int`       | `10`                       | Max project rows rendered per frame in `"project"` mode. Ranked by fleet-worst severity then most-recent activity.                                                                                                                                                                                       |
+| `cursor_cache_enabled`  | `bool`      | `true`                     | Seed each polled file from its last saved byte offset on startup instead of re-reading from byte 0. Disable for fully reproducible cold-start benchmarks.                                                                                                                                                |
+| `cursor_cache_dir`      | `str`       | `~/.local/state/codevigil` | Directory that holds the persistent cursor cache. Must resolve under `$HOME`.                                                                                                                                                                                                                            |
 
 ### Watch lifecycle
 
@@ -49,11 +50,20 @@ A session moves through three states: `ACTIVE` → `STALE` → `EVICTED`.
 - `STALE` — silent for at least `stale_after_seconds`. Collector state is **preserved** so a quick coffee break does not erase your metric history. A new APPEND flips the session back to ACTIVE.
 - `EVICTED` — silent for at least `evict_after_seconds`. Every collector's `reset()` method is called and the session context is dropped from the aggregator. A new APPEND on the same file id starts a fresh session.
 
+### Multi-root semantics
+
+- `watch.roots` is canonical. Use it for every new config file, even when you only watch one directory.
+- `watch.root` remains readable for backward compatibility. When explicitly set, codevigil mirrors it into `watch.roots = [watch.root]`.
+- When both are present in the same layer, `watch.roots` wins.
+- When both are present in different layers, the higher-precedence layer wins.
+- `CODEVIGIL_WATCH_ROOTS` is the canonical environment override and uses `os.pathsep` splitting.
+- `CODEVIGIL_WATCH_ROOT` remains supported as a deprecated single-root override and maps to `watch.roots = [value]`.
+
 ## `[collectors]`
 
-| Key       | Type        | Default                                                                       | Description                                                                                                                                                                                                                                                                                                           |
-| --------- | ----------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `enabled` | `list[str]` | `["read_edit_ratio", "stop_phrase", "reasoning_loop", "thinking", "prompts"]` | The user-facing collectors that ingest events. Must contain only names that exist in the registry. Duplicates are rejected. `parse_health` is **always on** and not part of this list. 0.3.0 adds `thinking` and `prompts` to the default list — users with an explicit override in their config file are unaffected. |
+| Key       | Type        | Default                                                                       | Description                                                                                                                                                                                                                                                                                                                 |
+| --------- | ----------- | ----------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `enabled` | `list[str]` | `["read_edit_ratio", "stop_phrase", "reasoning_loop", "thinking", "prompts"]` | The user-facing collectors that ingest events. Must contain only names that exist in the registry. Duplicates are rejected. `parse_health` is **always on** and not part of this list. `thinking` and `prompts` are part of the default collector set; users with an explicit override in their config file are unaffected. |
 
 Each enabled collector has its own subsection. The shipped subsections are documented below.
 
@@ -227,7 +237,7 @@ persistence enabled, writing to /home/user/.local/state/codevigil/sessions/
 
 The session directory is resolved as `$XDG_STATE_HOME/codevigil/sessions/` when `XDG_STATE_HOME` is set, falling back to `~/.local/state/codevigil/sessions/`.
 
-Session reports are written at session eviction time (when a session has been silent for `evict_after_seconds`). Each report is one JSON file named `<session_id>.json`. See `docs/design.md §Session Report Schema` for the full field reference and migration policy.
+Session reports are written at session eviction time (when a session has been silent for `evict_after_seconds`). Each report is one JSON file named `<session_key>.json`, where `session_key = <root_id>:<session_id>`. See `docs/design.md §Session Report Schema` for the full field reference and migration policy.
 
 ### Default behaviour (persistence disabled)
 
@@ -237,18 +247,19 @@ With the default `enable_persistence = false`, `codevigil watch` creates no file
 
 Only the keys in this map can be overridden via the environment. Every other key must be set in TOML or on the CLI. The bindings are kept small on purpose — a typo in a `CODEVIGIL_*` variable that is not in this list is a no-op, not a silent override.
 
-| Environment variable             | Maps to                |
-| -------------------------------- | ---------------------- |
-| `CODEVIGIL_LOG_PATH`             | `logging.log_path`     |
-| `CODEVIGIL_WATCH_ROOT`           | `watch.root`           |
-| `CODEVIGIL_WATCH_POLL_INTERVAL`  | `watch.poll_interval`  |
-| `CODEVIGIL_WATCH_TICK_INTERVAL`  | `watch.tick_interval`  |
-| `CODEVIGIL_WATCH_DISPLAY_LIMIT`  | `watch.display_limit`  |
-| `CODEVIGIL_REPORT_OUTPUT_DIR`    | `report.output_dir`    |
-| `CODEVIGIL_REPORT_OUTPUT_FORMAT` | `report.output_format` |
-| `CODEVIGIL_BOOTSTRAP_SESSIONS`   | `bootstrap.sessions`   |
+| Environment variable             | Maps to                   |
+| -------------------------------- | ------------------------- |
+| `CODEVIGIL_WATCH_ROOTS`          | `watch.roots`             |
+| `CODEVIGIL_LOG_PATH`             | `logging.log_path`        |
+| `CODEVIGIL_WATCH_ROOT`           | `watch.root` (deprecated) |
+| `CODEVIGIL_WATCH_POLL_INTERVAL`  | `watch.poll_interval`     |
+| `CODEVIGIL_WATCH_TICK_INTERVAL`  | `watch.tick_interval`     |
+| `CODEVIGIL_WATCH_DISPLAY_LIMIT`  | `watch.display_limit`     |
+| `CODEVIGIL_REPORT_OUTPUT_DIR`    | `report.output_dir`       |
+| `CODEVIGIL_REPORT_OUTPUT_FORMAT` | `report.output_format`    |
+| `CODEVIGIL_BOOTSTRAP_SESSIONS`   | `bootstrap.sessions`      |
 
-Environment values arrive as strings and are coerced against the default's declared type. `CODEVIGIL_WATCH_POLL_INTERVAL=0.5` parses as `float`; `CODEVIGIL_BOOTSTRAP_SESSIONS=20` parses as `int`. Coercion failures raise `ConfigError("config.type_mismatch")`.
+Environment values arrive as strings and are coerced against the default's declared type. `CODEVIGIL_WATCH_POLL_INTERVAL=0.5` parses as `float`; `CODEVIGIL_BOOTSTRAP_SESSIONS=20` parses as `int`. `CODEVIGIL_WATCH_ROOTS` uses `os.pathsep` splitting (`:` on Unix-like systems). Coercion failures raise `ConfigError("config.type_mismatch")`.
 
 ## Validation rules
 
@@ -308,7 +319,7 @@ output_dir = "~/codevigil-reports"
 ### Override everything via the environment
 
 ```bash
-export CODEVIGIL_WATCH_ROOT=~/work/.claude/projects
+export CODEVIGIL_WATCH_ROOTS=~/work/.claude/projects:~/work/other/.claude/projects
 export CODEVIGIL_WATCH_POLL_INTERVAL=0.5
 export CODEVIGIL_REPORT_OUTPUT_DIR=~/work/codevigil-reports
 codevigil watch

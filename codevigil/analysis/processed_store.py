@@ -64,8 +64,9 @@ from pathlib import Path
 from typing import Any
 
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
+from codevigil.watch_roots import LEGACY_ROOT_ID
 
-_SCHEMA_VERSION: int = 1
+_SCHEMA_VERSION: int = 2
 
 _SCHEMA_SQL: tuple[str, ...] = (
     """
@@ -75,7 +76,9 @@ _SCHEMA_SQL: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS processed_sessions (
-        session_id          TEXT PRIMARY KEY,
+        session_key         TEXT PRIMARY KEY,
+        root_id             TEXT NOT NULL,
+        session_id          TEXT NOT NULL,
         path                TEXT NOT NULL,
         inode               INTEGER NOT NULL,
         size                INTEGER NOT NULL,
@@ -97,6 +100,10 @@ _SCHEMA_SQL: tuple[str, ...] = (
         ON processed_sessions(path)
     """,
     """
+    CREATE INDEX IF NOT EXISTS idx_processed_sessions_root_session
+        ON processed_sessions(root_id, session_id)
+    """,
+    """
     CREATE INDEX IF NOT EXISTS idx_processed_sessions_project
         ON processed_sessions(project_hash)
     """,
@@ -106,22 +113,22 @@ _SCHEMA_SQL: tuple[str, ...] = (
     """,
     """
     CREATE TABLE IF NOT EXISTS processed_metrics (
-        session_id      TEXT NOT NULL,
+        session_key     TEXT NOT NULL,
         collector_name  TEXT NOT NULL,
         metric_name     TEXT NOT NULL,
         value           REAL NOT NULL,
         severity        TEXT NOT NULL,
         label           TEXT NOT NULL,
         detail_json     TEXT,
-        PRIMARY KEY (session_id, collector_name, metric_name),
-        FOREIGN KEY (session_id)
-            REFERENCES processed_sessions(session_id)
+        PRIMARY KEY (session_key, collector_name, metric_name),
+        FOREIGN KEY (session_key)
+            REFERENCES processed_sessions(session_key)
             ON DELETE CASCADE
     )
     """,
     """
     CREATE INDEX IF NOT EXISTS idx_processed_metrics_session
-        ON processed_metrics(session_id)
+        ON processed_metrics(session_key)
     """,
 )
 
@@ -195,6 +202,8 @@ class ProcessedSession:
     on write the caller passes a list alongside the main record.
     """
 
+    session_key: str
+    root_id: str
     session_id: str
     path: Path
     inode: int
@@ -244,14 +253,22 @@ class ProcessedSessionStore:
         self._conn.execute("PRAGMA foreign_keys = ON")
         self._conn.execute("PRAGMA journal_mode = WAL")
         with self._transaction():
-            for statement in _SCHEMA_SQL:
-                self._conn.execute(statement)
+            self._conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schema_version (
+                    version INTEGER PRIMARY KEY
+                )
+                """
+            )
             current = self._read_schema_version()
             if current is None:
+                self._ensure_schema()
                 self._conn.execute(
                     "INSERT INTO schema_version (version) VALUES (?)",
                     (_SCHEMA_VERSION,),
                 )
+            elif current == 1:
+                self._migrate_v1_to_v2()
             elif current != _SCHEMA_VERSION:
                 raise ProcessedStoreError(
                     code="processed_store.schema_mismatch",
@@ -261,6 +278,8 @@ class ProcessedSessionStore:
                         f"open — delete the file and re-run codevigil ingest"
                     ),
                 )
+            else:
+                self._ensure_schema()
 
     def close(self) -> None:
         if self._conn is not None:
@@ -283,6 +302,73 @@ class ProcessedSessionStore:
             return None
         return int(row[0])
 
+    def _ensure_schema(self) -> None:
+        assert self._conn is not None
+        for statement in _SCHEMA_SQL:
+            self._conn.execute(statement)
+
+    def _migrate_v1_to_v2(self) -> None:
+        assert self._conn is not None
+        self._conn.execute("PRAGMA foreign_keys = OFF")
+        self._conn.execute("ALTER TABLE processed_sessions RENAME TO processed_sessions_v1")
+        self._conn.execute("ALTER TABLE processed_metrics RENAME TO processed_metrics_v1")
+        self._ensure_schema()
+        self._conn.execute(
+            """
+            INSERT INTO processed_sessions (
+                session_key, root_id, session_id, path, inode, size, offset,
+                pending_b64, mtime, project_hash, project_name,
+                first_event_time, last_event_time, event_count,
+                session_task_type, collector_state_json, updated_at
+            )
+            SELECT
+                ? || session_id,
+                ?,
+                session_id,
+                path,
+                inode,
+                size,
+                offset,
+                pending_b64,
+                mtime,
+                project_hash,
+                project_name,
+                first_event_time,
+                last_event_time,
+                event_count,
+                session_task_type,
+                collector_state_json,
+                updated_at
+            FROM processed_sessions_v1
+            """,
+            (f"{LEGACY_ROOT_ID}:", LEGACY_ROOT_ID),
+        )
+        self._conn.execute(
+            """
+            INSERT INTO processed_metrics (
+                session_key, collector_name, metric_name, value, severity, label, detail_json
+            )
+            SELECT
+                ? || session_id,
+                collector_name,
+                metric_name,
+                value,
+                severity,
+                label,
+                detail_json
+            FROM processed_metrics_v1
+            """,
+            (f"{LEGACY_ROOT_ID}:",),
+        )
+        self._conn.execute("DROP TABLE processed_metrics_v1")
+        self._conn.execute("DROP TABLE processed_sessions_v1")
+        self._conn.execute("DELETE FROM schema_version")
+        self._conn.execute(
+            "INSERT INTO schema_version (version) VALUES (?)",
+            (_SCHEMA_VERSION,),
+        )
+        self._conn.execute("PRAGMA foreign_keys = ON")
+
     @contextmanager
     def _transaction(self) -> Iterator[None]:
         assert self._conn is not None
@@ -304,13 +390,15 @@ class ProcessedSessionStore:
             self._conn.execute(
                 """
                 INSERT OR REPLACE INTO processed_sessions (
-                    session_id, path, inode, size, offset, pending_b64,
+                    session_key, root_id, session_id, path, inode, size, offset, pending_b64,
                     mtime, project_hash, project_name,
                     first_event_time, last_event_time, event_count,
                     session_task_type, collector_state_json, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
+                    record.session_key,
+                    record.root_id,
                     record.session_id,
                     str(record.path),
                     record.inode,
@@ -329,19 +417,19 @@ class ProcessedSessionStore:
                 ),
             )
             self._conn.execute(
-                "DELETE FROM processed_metrics WHERE session_id = ?",
-                (record.session_id,),
+                "DELETE FROM processed_metrics WHERE session_key = ?",
+                (record.session_key,),
             )
             for metric in record.metrics:
                 self._conn.execute(
                     """
                     INSERT INTO processed_metrics (
-                        session_id, collector_name, metric_name,
+                        session_key, collector_name, metric_name,
                         value, severity, label, detail_json
                     ) VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        record.session_id,
+                        record.session_key,
                         metric.collector_name,
                         metric.metric_name,
                         float(metric.value),
@@ -355,29 +443,40 @@ class ProcessedSessionStore:
                     ),
                 )
 
-    def delete_session(self, session_id: str) -> None:
+    def delete_session(self, identifier: str, *, root_id: str | None = None) -> None:
         """Remove a session and its metrics. No-op if the row is absent."""
 
         assert self._conn is not None
         with self._transaction():
+            session_key = self._resolve_session_key(identifier, root_id=root_id)
+            if session_key is None:
+                return
             self._conn.execute(
-                "DELETE FROM processed_sessions WHERE session_id = ?",
-                (session_id,),
+                "DELETE FROM processed_sessions WHERE session_key = ?",
+                (session_key,),
             )
 
     # ----------------------------------------------------------- reads
 
-    def get_session(self, session_id: str) -> ProcessedSession | None:
+    def get_session(
+        self,
+        identifier: str,
+        *,
+        root_id: str | None = None,
+    ) -> ProcessedSession | None:
         assert self._conn is not None
+        session_key = self._resolve_session_key(identifier, root_id=root_id)
+        if session_key is None:
+            return None
         row = self._conn.execute(
             """
-            SELECT session_id, path, inode, size, offset, pending_b64,
+            SELECT session_key, root_id, session_id, path, inode, size, offset, pending_b64,
                    mtime, project_hash, project_name,
                    first_event_time, last_event_time, event_count,
                    session_task_type, collector_state_json, updated_at
-            FROM processed_sessions WHERE session_id = ?
+            FROM processed_sessions WHERE session_key = ?
             """,
-            (session_id,),
+            (session_key,),
         ).fetchone()
         if row is None:
             return None
@@ -390,7 +489,7 @@ class ProcessedSessionStore:
         assert self._conn is not None
         row = self._conn.execute(
             """
-            SELECT session_id, path, inode, size, offset, pending_b64,
+            SELECT session_key, root_id, session_id, path, inode, size, offset, pending_b64,
                    mtime, project_hash, project_name,
                    first_event_time, last_event_time, event_count,
                    session_task_type, collector_state_json, updated_at
@@ -409,7 +508,7 @@ class ProcessedSessionStore:
         assert self._conn is not None
         cursor = self._conn.execute(
             """
-            SELECT session_id, path, inode, size, offset, pending_b64,
+            SELECT session_key, root_id, session_id, path, inode, size, offset, pending_b64,
                    mtime, project_hash, project_name,
                    first_event_time, last_event_time, event_count,
                    session_task_type, collector_state_json, updated_at
@@ -473,7 +572,7 @@ class ProcessedSessionStore:
 
             latest_session_row = self._conn.execute(
                 """
-                SELECT session_id FROM processed_sessions
+                SELECT session_key FROM processed_sessions
                 WHERE COALESCE(NULLIF(project_name, ''), substr(project_hash, 1, 8)) = ?
                 ORDER BY last_event_time DESC
                 LIMIT 1
@@ -496,16 +595,16 @@ class ProcessedSessionStore:
             )
         return out
 
-    def _load_metrics(self, session_id: str) -> list[ProcessedMetric]:
+    def _load_metrics(self, session_key: str) -> list[ProcessedMetric]:
         assert self._conn is not None
         out: list[ProcessedMetric] = []
         for row in self._conn.execute(
             """
             SELECT collector_name, metric_name, value, severity, label, detail_json
-            FROM processed_metrics WHERE session_id = ?
+            FROM processed_metrics WHERE session_key = ?
             ORDER BY collector_name, metric_name
             """,
-            (session_id,),
+            (session_key,),
         ):
             detail: dict[str, object] | None = None if row[5] is None else json.loads(row[5])
             out.append(
@@ -520,28 +619,55 @@ class ProcessedSessionStore:
             )
         return out
 
+    def _resolve_session_key(self, identifier: str, *, root_id: str | None = None) -> str | None:
+        assert self._conn is not None
+        if ":" in identifier:
+            return identifier
+        if root_id is not None:
+            row = self._conn.execute(
+                """
+                SELECT session_key FROM processed_sessions
+                WHERE root_id = ? AND session_id = ?
+                LIMIT 1
+                """,
+                (root_id, identifier),
+            ).fetchone()
+            return str(row[0]) if row is not None else None
+        row = self._conn.execute(
+            """
+            SELECT session_key FROM processed_sessions
+            WHERE session_id = ?
+            ORDER BY updated_at DESC
+            LIMIT 1
+            """,
+            (identifier,),
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
 
 def _row_to_session(
     row: tuple[Any, ...],
     metrics: list[ProcessedMetric],
 ) -> ProcessedSession:
     return ProcessedSession(
-        session_id=str(row[0]),
-        path=Path(str(row[1])),
-        inode=int(row[2]),
-        size=int(row[3]),
-        offset=int(row[4]),
-        pending=base64.b64decode(str(row[5])),
-        mtime=float(row[6]),
-        project_hash=str(row[7]),
-        project_name=str(row[8]) if row[8] is not None else None,
-        first_event_time=datetime.fromisoformat(str(row[9])),
-        last_event_time=datetime.fromisoformat(str(row[10])),
-        event_count=int(row[11]),
-        session_task_type=str(row[12]) if row[12] is not None else None,
-        collector_state=json.loads(str(row[13])),
+        session_key=str(row[0]),
+        root_id=str(row[1]),
+        session_id=str(row[2]),
+        path=Path(str(row[3])),
+        inode=int(row[4]),
+        size=int(row[5]),
+        offset=int(row[6]),
+        pending=base64.b64decode(str(row[7])),
+        mtime=float(row[8]),
+        project_hash=str(row[9]),
+        project_name=str(row[10]) if row[10] is not None else None,
+        first_event_time=datetime.fromisoformat(str(row[11])),
+        last_event_time=datetime.fromisoformat(str(row[12])),
+        event_count=int(row[13]),
+        session_task_type=str(row[14]) if row[14] is not None else None,
+        collector_state=json.loads(str(row[15])),
         metrics=metrics,
-        updated_at=datetime.fromisoformat(str(row[14])),
+        updated_at=datetime.fromisoformat(str(row[16])),
     )
 
 

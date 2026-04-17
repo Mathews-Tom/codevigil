@@ -22,6 +22,7 @@ from pathlib import Path
 
 import pytest
 
+from codevigil.analysis.store import CURRENT_SCHEMA_VERSION
 from codevigil.report.loader import load_reports_from_jsonl
 
 _FIXTURES_ROOT = Path(__file__).parent / "fixtures"
@@ -53,7 +54,6 @@ _SCALAR_FIELDS: tuple[str, ...] = (
     "parse_confidence",
     "eviction_churn",
     "cohort_size",
-    "schema_version",
 )
 
 
@@ -125,6 +125,17 @@ class TestBaselineRegression:
                 f"session '{session_id}': field '{field}' diverged from baseline. "
                 f"baseline={expected[field]!r}, current={raw_value!r}"
             )
+
+    @pytest.mark.parametrize("session_id", _session_ids_to_check(_load_baseline()))
+    def test_schema_version_matches_current_code(
+        self,
+        session_id: str,
+        current_reports: dict[str, object],
+    ) -> None:
+        """Storage envelope version must track the current report schema."""
+        assert session_id in current_reports
+        report = current_reports[session_id]
+        assert report._data.get("schema_version") == CURRENT_SCHEMA_VERSION  # type: ignore[union-attr]
 
     @pytest.mark.parametrize("session_id", _session_ids_to_check(_load_baseline()))
     def test_metrics_match_baseline(

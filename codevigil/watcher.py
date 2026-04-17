@@ -59,7 +59,7 @@ import logging
 import os
 import stat
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import Enum
@@ -68,6 +68,7 @@ from typing import Protocol, runtime_checkable
 
 from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource, record
 from codevigil.privacy import PrivacyViolationError
+from codevigil.watch_roots import make_root_id, make_session_key
 from codevigil.watcher_cache import CachedCursor, CursorStore, prefix_fingerprint_for_path
 
 _CHUNK_SIZE: int = 1 * 1024 * 1024  # 1 MiB delta read chunk
@@ -102,6 +103,9 @@ class SourceEvent:
     inode: int
     line: str | None
     timestamp: datetime
+    root_id: str = ""
+    session_key: str = ""
+    root_label: str = ""
 
 
 @dataclass(slots=True)
@@ -175,6 +179,8 @@ class PollingSource:
         self,
         root: Path,
         *,
+        root_id: str | None = None,
+        root_label: str | None = None,
         interval: float = 2.0,
         max_files: int = 2000,
         large_file_warn_bytes: int = 10 * 1024 * 1024,
@@ -187,6 +193,8 @@ class PollingSource:
         self._cursors: dict[Path, FileCursor] = {}
         self._overflow_warned: bool = False
         self._root: Path = self._validate_root(root)
+        self._root_id: str = root_id if root_id is not None else make_root_id(self._root)
+        self._root_label: str = root_label if root_label is not None else str(self._root)
         # First-tick instrumentation: log cold-start costs at INFO so users
         # can see where the startup wall-clock went without enabling DEBUG.
         self._first_poll_done: bool = False
@@ -220,6 +228,10 @@ class PollingSource:
     @property
     def max_files(self) -> int:
         return self._max_files
+
+    @property
+    def root_id(self) -> str:
+        return self._root_id
 
     # ------------------------------------------------------------------ scope
 
@@ -354,6 +366,9 @@ class PollingSource:
                     inode=cursor.inode,
                     line=None,
                     timestamp=_now(),
+                    root_id=self._root_id,
+                    session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
 
@@ -450,6 +465,9 @@ class PollingSource:
                     inode=inode,
                     line=None,
                     timestamp=_now(),
+                    root_id=self._root_id,
+                    session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
             self._cursors.pop(path, None)
@@ -464,6 +482,9 @@ class PollingSource:
                     inode=inode,
                     line=None,
                     timestamp=_now(),
+                    root_id=self._root_id,
+                    session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
             self._cursors.pop(path, None)
@@ -518,6 +539,9 @@ class PollingSource:
                     inode=inode,
                     line=None,
                     timestamp=mtime_dt,
+                    root_id=self._root_id,
+                    session_key=self._session_key_for_path(path),
+                    root_label=self._root_label,
                 )
             )
         if size > start_offset:
@@ -612,6 +636,9 @@ class PollingSource:
                             inode=cursor.inode,
                             line=line,
                             timestamp=_now(),
+                            root_id=self._root_id,
+                            session_key=self._session_key_for_path(path),
+                            root_label=self._root_label,
                         )
                     )
             cursor.offset = handle.tell()
@@ -619,12 +646,40 @@ class PollingSource:
             handle.close()
         cursor.size = new_size
 
+    def _session_key_for_path(self, path: Path) -> str:
+        return make_session_key(self._root_id, path.stem)
+
+
+class MultiSource:
+    """Fan-in wrapper that polls multiple sources in configured order."""
+
+    def __init__(self, sources: Sequence[Source]) -> None:
+        self._sources = list(sources)
+
+    def poll(self) -> Iterator[SourceEvent]:
+        events: list[SourceEvent] = []
+        for source in self._sources:
+            events.extend(source.poll())
+        return iter(events)
+
+    def close(self) -> None:
+        first_error: CodevigilError | None = None
+        for source in self._sources:
+            try:
+                source.close()
+            except CodevigilError as err:
+                if first_error is None:
+                    first_error = err
+        if first_error is not None:
+            raise first_error
+
 
 # ``field`` is re-exported for symmetry with ``codevigil.types``; downstream
 # phases that build on ``FileCursor`` may want default_factory without a
 # second dataclasses import.
 __all__ = [
     "FileCursor",
+    "MultiSource",
     "PollingSource",
     "Source",
     "SourceEvent",
