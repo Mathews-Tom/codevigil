@@ -171,3 +171,34 @@ def test_report_markdown_includes_root_label_for_duplicate_session_ids(
     assert "## session `shared (" in out
     assert f"- root: `{root_a}`" in out
     assert f"- root: `{root_b}`" in out
+
+
+def test_report_rejects_invalid_watch_root_config(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    home = _setup_home(tmp_path, monkeypatch)
+    fixture = write_fixture_session(home / "session.jsonl")
+    outside_root = tmp_path / "outside-root"
+    outside_root.mkdir()
+    config_path = home / "codevigil.toml"
+    config_path.write_text(
+        f"[watch]\nroots = [{str(outside_root)!r}]\n",
+        encoding="utf-8",
+    )
+
+    exit_code = main(
+        [
+            "--config",
+            str(config_path),
+            "report",
+            str(fixture),
+            "--format",
+            "json",
+            "--from",
+            "2020-01-01",
+        ]
+    )
+    assert exit_code == 2
+    assert "config.watch_root_scope_violation" in capsys.readouterr().err

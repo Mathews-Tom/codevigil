@@ -899,6 +899,16 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
             )
         if path in seen_paths:
             continue
+        overlapping = _find_overlapping_root(path, seen_paths)
+        if overlapping is not None:
+            raise ConfigError(
+                code="config.overlapping_watch_roots",
+                message=(
+                    f"watch roots must be disjoint; {str(path)!r} overlaps with "
+                    f"{str(overlapping)!r}"
+                ),
+                context={"root": str(path), "overlaps_with": str(overlapping)},
+            )
         seen_paths.add(path)
         descriptors.append(describe_root(path))
     if not descriptors:
@@ -908,6 +918,13 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
             context={"key": "watch.roots"},
         )
     return descriptors
+
+
+def _find_overlapping_root(path: Path, seen_paths: set[Path]) -> Path | None:
+    for existing in seen_paths:
+        if path.is_relative_to(existing) or existing.is_relative_to(path):
+            return existing
+    return None
 
 
 def _format_value(value: Any) -> str:

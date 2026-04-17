@@ -1012,7 +1012,11 @@ def _run_report(args: argparse.Namespace) -> int:
         target="",
     )
 
-    roots = resolve_watch_roots(cfg)
+    try:
+        roots = resolve_watch_roots(cfg)
+    except ConfigError as err:
+        sys.stderr.write(_format_error(err))
+        return 2
     session_reports: list[_SessionReport] = []
     exit_code = 0
     for path in files:

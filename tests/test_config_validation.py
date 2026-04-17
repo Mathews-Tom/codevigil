@@ -119,6 +119,31 @@ def test_unknown_renderer_name_rejected(tmp_path: Path) -> None:
     assert exc.value.code == "config.unknown_renderer"
 
 
+def test_resolve_watch_roots_rejects_overlapping_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    home = tmp_path / "home"
+    nested = home / ".claude" / "projects" / "team-a"
+    nested.mkdir(parents=True)
+    monkeypatch.setenv("HOME", str(home))
+
+    resolved = load_config(
+        config_path=None,
+        env={},
+        cli_overrides={
+            "watch.roots": [
+                str(home / ".claude" / "projects"),
+                str(nested),
+            ]
+        },
+    )
+
+    with pytest.raises(ConfigError) as exc:
+        resolve_watch_roots(resolved.values)
+    assert exc.value.code == "config.overlapping_watch_roots"
+
+
 def test_invalid_report_output_format_rejected(tmp_path: Path) -> None:
     path = _write_config(
         tmp_path / "config.toml",
