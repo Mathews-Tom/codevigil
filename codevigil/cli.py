@@ -57,6 +57,7 @@ from codevigil.projects import ProjectRegistry
 from codevigil.renderers.terminal import TerminalRenderer, WatchStatus
 from codevigil.types import Event, MetricSnapshot, Severity
 from codevigil.ui.progress import progress_reporter
+from codevigil.watch_roots import RootDescriptor, make_session_key
 from codevigil.watcher import MultiSource, PollingSource
 
 # ---------------------------------------------------------------------------
@@ -640,6 +641,7 @@ def _run_watch(args: argparse.Namespace) -> int:
             PollingSource(
                 root.root_path,
                 root_id=root.root_id,
+                root_label=root.display_name,
                 interval=float(watch_cfg["poll_interval"]),
                 max_files=int(watch_cfg["max_files"]),
                 large_file_warn_bytes=int(watch_cfg["large_file_warn_bytes"]),
@@ -855,6 +857,9 @@ class _SessionReport:
     """One session's rolled-up report derived from a fully-parsed file."""
 
     session_id: str
+    session_key: str
+    root_id: str | None
+    root_label: str | None
     file_path: Path
     first_event_time: datetime | None
     last_event_time: datetime | None
@@ -1007,10 +1012,11 @@ def _run_report(args: argparse.Namespace) -> int:
         target="",
     )
 
+    roots = resolve_watch_roots(cfg)
     session_reports: list[_SessionReport] = []
     exit_code = 0
     for path in files:
-        report = _build_session_report(path, cfg)
+        report = _build_session_report(path, cfg, roots=roots)
         session_reports.append(report)
         if report.parse_confidence < 0.9:
             exit_code = 2
@@ -1832,7 +1838,17 @@ def _build_collector_instances(
     return instances
 
 
-def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
+def _match_report_root(path: Path, roots: Sequence[RootDescriptor]) -> RootDescriptor | None:
+    resolved = path.expanduser().resolve()
+    for root in roots:
+        if resolved.is_relative_to(root.root_path):
+            return root
+    return None
+
+
+def _build_session_report(
+    path: Path, cfg: dict[str, Any], *, roots: Sequence[RootDescriptor]
+) -> _SessionReport:
     """Parse ``path`` end-to-end and run every enabled collector offline.
 
     One-shot replay of the per-session ingest path: every event feeds
@@ -1843,6 +1859,8 @@ def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
     from codevigil.collectors import COLLECTORS  # local to avoid CLI/boot cycle
 
     session_id = path.stem
+    root = _match_report_root(path, roots)
+    session_key = make_session_key(root.root_id, session_id) if root is not None else session_id
     parser = SessionParser(session_id=session_id)
     collector_instances = _build_collector_instances(cfg, parser, COLLECTORS)
 
@@ -1876,6 +1894,9 @@ def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
 
     return _SessionReport(
         session_id=session_id,
+        session_key=session_key,
+        root_id=root.root_id if root is not None else None,
+        root_label=root.display_name if root is not None else None,
         file_path=path,
         first_event_time=first_ts,
         last_event_time=last_ts,
@@ -1885,9 +1906,24 @@ def _build_session_report(path: Path, cfg: dict[str, Any]) -> _SessionReport:
     )
 
 
+def _reports_need_root_identity(reports: Sequence[_SessionReport]) -> bool:
+    root_ids = {report.root_id for report in reports if report.root_id}
+    if len(root_ids) > 1:
+        return True
+    session_ids = [report.session_id for report in reports]
+    return len(session_ids) != len(set(session_ids))
+
+
+def _render_report_identity(report: _SessionReport, *, show_root: bool) -> str:
+    if not show_root or report.root_label is None:
+        return report.session_id
+    return f"{report.session_id} ({report.root_label})"
+
+
 def _render_report_json(reports: list[_SessionReport], *, explain: bool) -> str:
     out_lines: list[str] = []
-    for report in sorted(reports, key=lambda r: r.session_id):
+    show_root = _reports_need_root_identity(reports)
+    for report in sorted(reports, key=lambda r: (r.session_id, r.session_key)):
         record: dict[str, Any] = {
             "kind": "session_report",
             "session_id": report.session_id,
@@ -1905,6 +1941,10 @@ def _render_report_json(reports: list[_SessionReport], *, explain: bool) -> str:
                 for m in sorted(report.metrics, key=lambda m: m.name)
             ],
         }
+        if show_root:
+            record["session_key"] = report.session_key
+            record["root_id"] = report.root_id
+            record["root_label"] = report.root_label
         out_lines.append(json.dumps(record, sort_keys=True, separators=(",", ":")))
     return "\n".join(out_lines) + ("\n" if out_lines else "")
 
@@ -1918,10 +1958,13 @@ def _render_report_markdown(reports: list[_SessionReport], *, explain: bool) -> 
     """
 
     lines: list[str] = ["# codevigil report", ""]
-    for report in sorted(reports, key=lambda r: r.session_id):
-        lines.append(f"## session `{report.session_id}`")
+    show_root = _reports_need_root_identity(reports)
+    for report in sorted(reports, key=lambda r: (r.session_id, r.session_key)):
+        lines.append(f"## session `{_render_report_identity(report, show_root=show_root)}`")
         lines.append("")
         lines.append(f"- file: `{report.file_path}`")
+        if show_root and report.root_label is not None:
+            lines.append(f"- root: `{report.root_label}`")
         lines.append(f"- events: {report.event_count}")
         lines.append(f"- parse_confidence: {report.parse_confidence:.2f}")
         lines.append("")
