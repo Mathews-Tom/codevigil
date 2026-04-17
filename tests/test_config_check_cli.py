@@ -30,6 +30,7 @@ def test_config_check_prints_defaults(
     # A few representative leaf keys with their default provenance.
     assert "watch.poll_interval = 60.0  (default)" in out
     assert "watch.root = '~/.claude/projects'  (default)" in out
+    assert "watch.roots = ['~/.claude/projects']  (default)" in out
     enabled_line = (
         "collectors.enabled = ['read_edit_ratio', 'stop_phrase', 'reasoning_loop', "
         "'thinking', 'prompts']  (default)"

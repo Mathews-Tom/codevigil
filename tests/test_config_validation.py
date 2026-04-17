@@ -171,6 +171,29 @@ def test_duplicate_collector_name_rejected(tmp_path: Path) -> None:
     assert exc.value.code == "config.duplicate_collector"
 
 
+def test_empty_watch_roots_rejected(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        roots = []
+        """,
+    )
+    with pytest.raises(ConfigError) as exc:
+        load_config(config_path=path, env={}, cli_overrides={})
+    assert exc.value.code == "config.empty_watch_roots"
+
+
+def test_empty_watch_roots_env_rejected() -> None:
+    with pytest.raises(ConfigError) as exc:
+        load_config(
+            config_path=None,
+            env={"CODEVIGIL_WATCH_ROOTS": ""},
+            cli_overrides={},
+        )
+    assert exc.value.code == "config.empty_watch_roots"
+
+
 # ---------------------------------------------------------------------------
 # classifier section
 # ---------------------------------------------------------------------------

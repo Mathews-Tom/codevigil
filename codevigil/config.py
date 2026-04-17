@@ -32,6 +32,7 @@ from codevigil.errors import CodevigilError, ErrorLevel, ErrorSource
 CONFIG_DEFAULTS: dict[str, Any] = {
     "watch": {
         "root": "~/.claude/projects",
+        "roots": ["~/.claude/projects"],
         "poll_interval": 60.0,
         "max_files": 2000,
         "large_file_warn_bytes": 10 * 1024 * 1024,
@@ -164,6 +165,7 @@ _VALID_OUTPUT_FORMATS: frozenset[str] = frozenset({"json", "markdown"})
 _ENV_BINDINGS: dict[str, tuple[str, ...]] = {
     "CODEVIGIL_LOG_PATH": ("logging", "log_path"),
     "CODEVIGIL_WATCH_ROOT": ("watch", "root"),
+    "CODEVIGIL_WATCH_ROOTS": ("watch", "roots"),
     "CODEVIGIL_WATCH_POLL_INTERVAL": ("watch", "poll_interval"),
     "CODEVIGIL_WATCH_TICK_INTERVAL": ("watch", "tick_interval"),
     "CODEVIGIL_WATCH_DISPLAY_LIMIT": ("watch", "display_limit"),
@@ -270,6 +272,7 @@ def load_config(
         _assign_dotted(values, dotted, coerced)
         sources[dotted] = f"cli:--{dotted}"
 
+    _normalize_watch_root_aliases(values, sources)
     _validate_resolved(values)
     return ResolvedConfig(values=values, sources=sources)
 
@@ -639,9 +642,59 @@ def _coerce_scalar(dotted: str, raw: Any, *, source: str) -> Any:
     if isinstance(default, float):
         return _parse_str_as_float(dotted, raw, source=source)
     if isinstance(default, list):
+        if dotted == "watch.roots":
+            return [part.strip() for part in raw.split(os.pathsep) if part.strip()]
         # Comma-separated env / CLI form: "a,b,c".
         return [part.strip() for part in raw.split(",") if part.strip()]
     return raw
+
+
+def _source_rank(source: str) -> int:
+    if source.startswith("cli:"):
+        return 3
+    if source.startswith("env:"):
+        return 2
+    if source.startswith("file:"):
+        return 1
+    return 0
+
+
+def _normalize_watch_root_aliases(values: dict[str, Any], sources: dict[str, str]) -> None:
+    """Resolve legacy ``watch.root`` and canonical ``watch.roots`` into sync.
+
+    ``watch.roots`` is the canonical multi-root field. ``watch.root`` remains a
+    single-root compatibility alias for existing runtime call sites. When both
+    are explicitly configured, the higher-precedence layer wins; ties within the
+    same layer prefer ``watch.roots``.
+    """
+
+    root_source = sources.get("watch.root", "default")
+    roots_source = sources.get("watch.roots", "default")
+    root_rank = _source_rank(root_source)
+    roots_rank = _source_rank(roots_source)
+    root_value = _read_dotted(values, "watch.root")
+    roots_value = _read_dotted(values, "watch.roots")
+
+    roots_wins = roots_rank > root_rank or (roots_rank == root_rank and roots_rank > 0)
+    if roots_wins:
+        if not roots_value:
+            raise ConfigError(
+                code="config.empty_watch_roots",
+                message="watch.roots must contain at least one path",
+                context={"key": "watch.roots", "source": roots_source},
+            )
+        _assign_dotted(values, "watch.root", roots_value[0])
+        sources["watch.root"] = roots_source
+        return
+
+    if not isinstance(root_value, str) or not root_value:
+        raise ConfigError(
+            code="config.empty_watch_root",
+            message="watch.root must be a non-empty string",
+            context={"key": "watch.root", "source": root_source},
+        )
+    _assign_dotted(values, "watch.roots", [root_value])
+    sources["watch.roots"] = root_source
 
 
 # (dotted_path, minimum, maximum, kind) — iterated in _validate_resolved.
@@ -683,6 +736,7 @@ def _validate_resolved(values: dict[str, Any]) -> None:
     )
     _validate_output_format(values)
     _validate_parse_health_undisableable(values)
+    _validate_watch_roots(values)
 
 
 def _validate_parse_health_undisableable(values: dict[str, Any]) -> None:
@@ -778,6 +832,16 @@ def _validate_output_format(values: dict[str, Any]) -> None:
                 f"report.output_format = {fmt!r} is not one of {sorted(_VALID_OUTPUT_FORMATS)!r}"
             ),
             context={"value": fmt, "valid": sorted(_VALID_OUTPUT_FORMATS)},
+        )
+
+
+def _validate_watch_roots(values: dict[str, Any]) -> None:
+    roots = _read_dotted(values, "watch.roots")
+    if not roots:
+        raise ConfigError(
+            code="config.empty_watch_roots",
+            message="watch.roots must contain at least one path",
+            context={"key": "watch.roots"},
         )
 
 

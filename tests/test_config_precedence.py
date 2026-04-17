@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 from codevigil.config import load_config
@@ -87,6 +88,8 @@ def test_unrelated_layers_do_not_disturb_unchanged_keys(tmp_path: Path) -> None:
     # watch.root was not overridden anywhere — it still resolves to the default.
     assert resolved.values["watch"]["root"] == "~/.claude/projects"
     assert resolved.sources["watch.root"] == "default"
+    assert resolved.values["watch"]["roots"] == ["~/.claude/projects"]
+    assert resolved.sources["watch.roots"] == "default"
 
 
 def test_comma_separated_env_list(tmp_path: Path) -> None:
@@ -106,3 +109,65 @@ def test_int_coercion_from_env() -> None:
     )
     assert resolved.values["bootstrap"]["sessions"] == 25
     assert resolved.sources["bootstrap.sessions"] == "env:CODEVIGIL_BOOTSTRAP_SESSIONS"
+
+
+def test_file_watch_roots_derives_legacy_watch_root(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        roots = ["~/a", "~/b"]
+        """,
+    )
+    resolved = load_config(config_path=path, env={}, cli_overrides={})
+    assert resolved.values["watch"]["roots"] == ["~/a", "~/b"]
+    assert resolved.values["watch"]["root"] == "~/a"
+    assert resolved.sources["watch.roots"].startswith("file:")
+    assert resolved.sources["watch.root"] == resolved.sources["watch.roots"]
+
+
+def test_env_watch_roots_uses_os_pathsep_and_derives_watch_root() -> None:
+    resolved = load_config(
+        config_path=None,
+        env={"CODEVIGIL_WATCH_ROOTS": f"~/a{os.pathsep}~/b"},
+        cli_overrides={},
+    )
+    assert resolved.values["watch"]["roots"] == ["~/a", "~/b"]
+    assert resolved.values["watch"]["root"] == "~/a"
+    assert resolved.sources["watch.roots"] == "env:CODEVIGIL_WATCH_ROOTS"
+    assert resolved.sources["watch.root"] == "env:CODEVIGIL_WATCH_ROOTS"
+
+
+def test_higher_precedence_watch_root_overrides_lower_precedence_watch_roots(
+    tmp_path: Path,
+) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        roots = ["~/a", "~/b"]
+        """,
+    )
+    resolved = load_config(
+        config_path=path,
+        env={"CODEVIGIL_WATCH_ROOT": "~/override"},
+        cli_overrides={},
+    )
+    assert resolved.values["watch"]["root"] == "~/override"
+    assert resolved.values["watch"]["roots"] == ["~/override"]
+    assert resolved.sources["watch.root"] == "env:CODEVIGIL_WATCH_ROOT"
+    assert resolved.sources["watch.roots"] == "env:CODEVIGIL_WATCH_ROOT"
+
+
+def test_same_layer_prefers_watch_roots_over_legacy_watch_root(tmp_path: Path) -> None:
+    path = _write_config(
+        tmp_path / "config.toml",
+        """
+        [watch]
+        root = "~/legacy"
+        roots = ["~/canon-a", "~/canon-b"]
+        """,
+    )
+    resolved = load_config(config_path=path, env={}, cli_overrides={})
+    assert resolved.values["watch"]["root"] == "~/canon-a"
+    assert resolved.values["watch"]["roots"] == ["~/canon-a", "~/canon-b"]
