@@ -136,6 +136,7 @@ def test_env_watch_roots_uses_os_pathsep_and_derives_watch_root() -> None:
     assert resolved.values["watch"]["root"] == "~/a"
     assert resolved.sources["watch.roots"] == "env:CODEVIGIL_WATCH_ROOTS"
     assert resolved.sources["watch.root"] == "env:CODEVIGIL_WATCH_ROOTS"
+    assert resolved.deprecations == ()
 
 
 def test_higher_precedence_watch_root_overrides_lower_precedence_watch_roots(
@@ -157,6 +158,9 @@ def test_higher_precedence_watch_root_overrides_lower_precedence_watch_roots(
     assert resolved.values["watch"]["roots"] == ["~/override"]
     assert resolved.sources["watch.root"] == "env:CODEVIGIL_WATCH_ROOT"
     assert resolved.sources["watch.roots"] == "env:CODEVIGIL_WATCH_ROOT"
+    assert resolved.deprecations == (
+        "CODEVIGIL_WATCH_ROOT is deprecated; use CODEVIGIL_WATCH_ROOTS instead.",
+    )
 
 
 def test_same_layer_prefers_watch_roots_over_legacy_watch_root(tmp_path: Path) -> None:
@@ -171,3 +175,6 @@ def test_same_layer_prefers_watch_roots_over_legacy_watch_root(tmp_path: Path) -
     resolved = load_config(config_path=path, env={}, cli_overrides={})
     assert resolved.values["watch"]["root"] == "~/canon-a"
     assert resolved.values["watch"]["roots"] == ["~/canon-a", "~/canon-b"]
+    assert resolved.deprecations == (
+        f"file:{path} sets deprecated watch.root; use watch.roots instead.",
+    )

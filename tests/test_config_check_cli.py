@@ -27,6 +27,7 @@ def test_config_check_prints_defaults(
     assert captured.err == ""
     out = captured.out
     assert out.startswith("codevigil config check\n")
+    assert "deprecations\n" not in out
     # A few representative leaf keys with their default provenance.
     assert "watch.poll_interval = 60.0  (default)" in out
     assert "watch.root = '~/.claude/projects'  (default)" in out
@@ -53,6 +54,37 @@ def test_config_check_shows_file_source(
     assert exit_code == 0
     out = capsys.readouterr().out
     assert f"watch.poll_interval = 6.5  (file:{config_file})" in out
+
+
+def test_config_check_shows_watch_root_deprecation_from_file(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config_file = tmp_path / "c.toml"
+    config_file.write_text("[watch]\nroot = '~/legacy'\n", encoding="utf-8")
+    for env_key in list(k for k in __import__("os").environ if k.startswith("CODEVIGIL_")):
+        monkeypatch.delenv(env_key, raising=False)
+
+    exit_code = main(["--config", str(config_file), "config", "check"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "deprecations" in out
+    assert f"file:{config_file} sets deprecated watch.root; use watch.roots instead." in out
+
+
+def test_config_check_shows_watch_root_env_deprecation(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("CODEVIGIL_WATCH_ROOT", "~/legacy")
+
+    exit_code = main(["config", "check"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "CODEVIGIL_WATCH_ROOT is deprecated; use CODEVIGIL_WATCH_ROOTS instead." in out
 
 
 def test_config_check_reports_validation_error(

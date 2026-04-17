@@ -213,6 +213,7 @@ class ResolvedConfig:
 
     values: dict[str, Any]
     sources: dict[str, str] = field(default_factory=dict)
+    deprecations: tuple[str, ...] = ()
 
 
 # ---------------------------------------------------------------------------
@@ -250,9 +251,15 @@ def load_config(
 
     values: dict[str, Any] = _deep_copy_defaults()
     sources: dict[str, str] = _flatten_sources(values, source="default")
+    deprecations: list[str] = []
 
     file_values, file_path_used = _load_file_layer(config_path)
     if file_values is not None:
+        _collect_deprecations_from_layer(
+            deprecations,
+            source=f"file:{file_path_used}",
+            values=file_values,
+        )
         _validate_layer_shape(file_values, source=f"file:{file_path_used}")
         _apply_layer(
             values,
@@ -263,11 +270,17 @@ def load_config(
 
     env_values = _collect_env_overrides(environment)
     for dotted, (raw_value, env_name) in env_values.items():
+        if dotted == "watch.root":
+            deprecations.append(
+                "CODEVIGIL_WATCH_ROOT is deprecated; use CODEVIGIL_WATCH_ROOTS instead."
+            )
         coerced = _coerce_scalar(dotted, raw_value, source=f"env:{env_name}")
         _assign_dotted(values, dotted, coerced)
         sources[dotted] = f"env:{env_name}"
 
     for dotted, raw_value in overrides.items():
+        if dotted == "watch.root":
+            deprecations.append("watch.root is deprecated; use watch.roots instead.")
         _check_known_path(dotted, source="cli")
         coerced = _coerce_scalar(dotted, raw_value, source=f"cli:--{dotted}")
         _assign_dotted(values, dotted, coerced)
@@ -275,13 +288,21 @@ def load_config(
 
     _normalize_watch_root_aliases(values, sources)
     _validate_resolved(values)
-    return ResolvedConfig(values=values, sources=sources)
+    return ResolvedConfig(
+        values=values,
+        sources=sources,
+        deprecations=tuple(dict.fromkeys(deprecations)),
+    )
 
 
 def render_config_check(resolved: ResolvedConfig) -> str:
     """Format a resolved config for the ``codevigil config check`` command."""
 
     lines: list[str] = ["codevigil config check"]
+    if resolved.deprecations:
+        lines.append("deprecations")
+        for message in resolved.deprecations:
+            lines.append(f"  - {message}")
     for dotted in sorted(resolved.sources):
         value = _read_dotted(resolved.values, dotted)
         source = resolved.sources[dotted]
@@ -343,6 +364,19 @@ def _load_file_layer(config_path: Path | None) -> tuple[dict[str, Any] | None, P
             context={"path": str(expanded)},
         )
     return _read_toml(expanded), expanded
+
+
+def _collect_deprecations_from_layer(
+    deprecations: list[str],
+    *,
+    source: str,
+    values: dict[str, Any],
+) -> None:
+    watch = values.get("watch")
+    if not isinstance(watch, dict):
+        return
+    if "root" in watch:
+        deprecations.append(f"{source} sets deprecated watch.root; use watch.roots instead.")
 
 
 def _read_toml(path: Path) -> dict[str, Any]:
@@ -859,8 +893,7 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
             raise ConfigError(
                 code="config.watch_root_scope_violation",
                 message=(
-                    f"watch root {str(path)!r} is outside the user home directory "
-                    f"{str(home)!r}"
+                    f"watch root {str(path)!r} is outside the user home directory {str(home)!r}"
                 ),
                 context={"root": str(path), "home": str(home)},
             )
@@ -891,6 +924,6 @@ __all__ = [
     "ResolvedConfig",
     "ResolvedValue",
     "load_config",
-    "resolve_watch_roots",
     "render_config_check",
+    "resolve_watch_roots",
 ]
