@@ -888,15 +888,7 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
     descriptors: list[RootDescriptor] = []
     seen_paths: set[Path] = set()
     for raw in raw_roots:
-        path = Path(str(raw)).expanduser().resolve()
-        if not path.is_relative_to(home):
-            raise ConfigError(
-                code="config.watch_root_scope_violation",
-                message=(
-                    f"watch root {str(path)!r} is outside the user home directory {str(home)!r}"
-                ),
-                context={"root": str(path), "home": str(home)},
-            )
+        path = _resolve_watch_root_path(raw, home)
         if path in seen_paths:
             continue
         overlapping = _find_overlapping_root(path, seen_paths)
@@ -918,6 +910,17 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
             context={"key": "watch.roots"},
         )
     return descriptors
+
+
+def _resolve_watch_root_path(raw: Any, home: Path) -> Path:
+    path = Path(str(raw)).expanduser().resolve()
+    if path.is_relative_to(home):
+        return path
+    raise ConfigError(
+        code="config.watch_root_scope_violation",
+        message=f"watch root {str(path)!r} is outside the user home directory {str(home)!r}",
+        context={"root": str(path), "home": str(home)},
+    )
 
 
 def _find_overlapping_root(path: Path, seen_paths: set[Path]) -> Path | None:

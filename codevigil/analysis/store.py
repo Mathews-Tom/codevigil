@@ -65,6 +65,7 @@ import json
 import logging
 import os
 import tempfile
+from collections.abc import Iterator
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -445,13 +446,7 @@ class SessionStore:
         if not self._base_dir.exists():
             return None
         matched: SessionReport | None = None
-        for candidate in self._base_dir.iterdir():
-            if candidate.suffix != ".json" or candidate.stem.startswith("."):
-                continue
-            try:
-                report = self._load_report_file(candidate)
-            except (OSError, json.JSONDecodeError, MigrationError, StoreError):
-                continue
+        for report in self._iter_report_files():
             if report.session_id == identifier or report.session_key == identifier:
                 if report.session_key == identifier:
                     return report
@@ -466,6 +461,15 @@ class SessionStore:
     def _load_report_file(self, path: Path) -> SessionReport:
         raw = json.loads(path.read_text(encoding="utf-8"))
         return SessionReport.from_dict(raw)
+
+    def _iter_report_files(self) -> Iterator[SessionReport]:
+        for candidate in self._base_dir.iterdir():
+            if candidate.suffix != ".json" or candidate.stem.startswith("."):
+                continue
+            try:
+                yield self._load_report_file(candidate)
+            except (OSError, json.JSONDecodeError, MigrationError, StoreError):
+                continue
 
     # ------------------------------------------------------------------ internals
 
