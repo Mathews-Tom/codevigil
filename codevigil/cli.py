@@ -263,6 +263,10 @@ def _build_parser() -> argparse.ArgumentParser:
 def _run_config_check(args: argparse.Namespace) -> int:
     try:
         resolved = load_config(config_path=args.config)
+        # Surface watch-root scope / overlap violations here too so
+        # ``config check`` does not green-light a config that subsequent
+        # commands (``ingest``, ``watch``, ``report``) will reject.
+        resolve_watch_roots(resolved.values)
     except ConfigError as err:
         sys.stderr.write(_format_error(err))
         return 2 if err.level is ErrorLevel.CRITICAL else 1

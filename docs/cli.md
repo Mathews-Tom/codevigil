@@ -81,7 +81,7 @@ Cold-ingest every JSONL session under `watch.roots` into the persistent processe
 
 ### What it does
 
-1. Resolves config and validates that every path in `watch.roots` lies under `$HOME`.
+1. Resolves config and validates that every path in `watch.roots` lies under `$HOME` (unless `watch.allow_roots_outside_home = true` is set — see `docs/configuration.md` and `docs/privacy.md` for the scope and safety boundary of that opt-in).
 2. Walks every configured watch root for `*.jsonl` files (up to `watch.max_files` per poll source).
 3. For each file: parses end-to-end, runs every enabled collector, and writes one row into the processed store containing `session_key`, raw `session_id`, file id, final byte offset, serialised collector state, and derived metric summary.
 4. Emits a one-line progress report per file and a final summary: files seen, sessions ingested, sessions skipped (already present), bytes processed.
@@ -120,7 +120,7 @@ Starts the live tick loop. Polls every configured watch root at `watch.poll_inte
 ### What it does
 
 1. Resolves config.
-2. Constructs one `PollingSource` per resolved entry in `watch.roots` (default `["~/.claude/projects"]`). Refuses to start if any resolved root is outside `$HOME`.
+2. Constructs one `PollingSource` per resolved entry in `watch.roots` (default `["~/.claude/projects"]`). Refuses to start if any resolved root is outside `$HOME`, unless `watch.allow_roots_outside_home = true` is set. (The opt-in relaxes the read-side gate only; renderer and report output paths still reject targets outside `$HOME`.)
 3. Loads `~/.config/codevigil/projects.toml` if present, for friendly project name resolution.
 4. Constructs a `SessionAggregator` with the bootstrap manager loaded from `bootstrap.state_path`.
 5. Runs the tick loop:

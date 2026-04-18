@@ -253,6 +253,105 @@ def test_resolve_watch_roots_rejects_path_outside_home(
     with pytest.raises(ConfigError) as exc:
         resolve_watch_roots(cfg.values)
     assert exc.value.code == "config.watch_root_scope_violation"
+    assert "allow_roots_outside_home" in exc.value.message
+
+
+def test_allow_roots_outside_home_defaults_to_false(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    cfg = load_config(config_path=None, env={}, cli_overrides={})
+    assert cfg.values["watch"]["allow_roots_outside_home"] is False
+
+
+def test_allow_roots_outside_home_toml_opt_in_permits_outside_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = _write_config(
+        tmp_path / "config.toml",
+        f"""
+        [watch]
+        roots = [{str(outside)!r}]
+        allow_roots_outside_home = true
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    descriptors = resolve_watch_roots(cfg.values)
+    assert len(descriptors) == 1
+    assert descriptors[0].root_path == outside.resolve()
+
+
+def test_allow_roots_outside_home_env_opt_in_permits_outside_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    cfg = load_config(
+        config_path=None,
+        env={
+            "CODEVIGIL_WATCH_ROOTS": str(outside),
+            "CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME": "true",
+        },
+        cli_overrides={},
+    )
+    descriptors = resolve_watch_roots(cfg.values)
+    assert len(descriptors) == 1
+    assert descriptors[0].root_path == outside.resolve()
+
+
+def test_allow_roots_outside_home_opt_in_still_rejects_overlap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    outside_parent = tmp_path / "outside"
+    outside_child = outside_parent / "nested"
+    outside_child.mkdir(parents=True)
+    path = _write_config(
+        tmp_path / "config.toml",
+        f"""
+        [watch]
+        roots = [{str(outside_parent)!r}, {str(outside_child)!r}]
+        allow_roots_outside_home = true
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    with pytest.raises(ConfigError) as exc:
+        resolve_watch_roots(cfg.values)
+    assert exc.value.code == "config.overlapping_watch_roots"
+
+
+def test_allow_roots_outside_home_opt_in_still_accepts_inside_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    home_root = tmp_path / "home" / ".claude" / "projects"
+    home_root.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    path = _write_config(
+        tmp_path / "config.toml",
+        f"""
+        [watch]
+        roots = [{str(home_root)!r}, {str(outside)!r}]
+        allow_roots_outside_home = true
+        """,
+    )
+    cfg = load_config(config_path=path, env={}, cli_overrides={})
+    descriptors = resolve_watch_roots(cfg.values)
+    assert {d.root_path for d in descriptors} == {home_root.resolve(), outside.resolve()}
 
 
 # ---------------------------------------------------------------------------

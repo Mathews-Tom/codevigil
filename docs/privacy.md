@@ -78,14 +78,26 @@ The CI workflow at `.github/workflows/ci.yml` runs the gate as a separate `priva
 
 The watcher, ingest path, report writer, and config root normaliser all refuse to operate outside `$HOME` via a `Path.resolve().is_relative_to(Path.home().resolve())` check. Specifically:
 
-- **`resolve_watch_roots()`** validates every configured entry in `watch.roots` after `expanduser().resolve()`. Any root outside `$HOME` raises `ConfigError` before watch or ingest starts.
+- **`resolve_watch_roots()`** validates every configured entry in `watch.roots` after `expanduser().resolve()`. Any root outside `$HOME` raises `ConfigError` before watch or ingest starts — unless the user has explicitly opted in via `watch.allow_roots_outside_home = true` (see below).
 - **`PollingSource(root)`** validates `root.resolve()` against `Path.home().resolve()` at construction time. Any root outside `$HOME` raises `PrivacyViolationError` and records a CRITICAL `CodevigilError` on the channel before the exception propagates.
-- **`JsonFileRenderer(output_dir)`** applies the same check at construction time. Same error path.
-- **`codevigil report --output DIR`** applies the same check before writing any file.
+- **`JsonFileRenderer(output_dir)`** applies the same check at construction time. Same error path. **Not** affected by `allow_roots_outside_home`.
+- **`codevigil report --output DIR`** applies the same check before writing any file. **Not** affected by `allow_roots_outside_home`.
 
 This protects against accidentally pointing codevigil at a system directory or shared mount, and against accidentally writing reports to a path that you didn't intend. Multi-root support does not weaken the rule: every configured watch root is validated independently, and startup fails if any one of them is out of scope.
 
 The check uses `Path.resolve()` so symlinks are followed once at construction time — a symlink inside `$HOME` that points outside `$HOME` is also blocked.
+
+### Opt-in: `watch.allow_roots_outside_home`
+
+Some legitimate setups need watch roots that are physically outside the operator's `$HOME`:
+
+- A Windows host watching WSL's ext4 `/home/<user>/.claude/projects/` through `\\wsl.localhost\...`.
+- A developer workstation observing a mounted remote dev box (SSHFS, NFS, or equivalent).
+- A multi-profile setup where two user homes sit under different parent directories.
+
+For these cases `watch.allow_roots_outside_home = true` (or `CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME=true`) opts in explicitly, trading the default-strict guard for the flexibility the scenario requires. The opt-in is **scoped to `watch.roots` only** — it does not affect the write-side gates. Report output directories and the JSON file renderer continue to reject any path outside `$HOME` regardless of this flag, so codevigil cannot be coaxed into writing outside the operator's home even when it is reading from outside it.
+
+The flag must be set explicitly: the default remains `false`, and the runtime refusal still points users at the flag name so the opt-in is never accidental.
 
 ## What is **not** in scope
 
