@@ -79,7 +79,7 @@ The CI workflow at `.github/workflows/ci.yml` runs the gate as a separate `priva
 The watcher, ingest path, report writer, and config root normaliser all refuse to operate outside `$HOME` via a `Path.resolve().is_relative_to(Path.home().resolve())` check. Specifically:
 
 - **`resolve_watch_roots()`** validates every configured entry in `watch.roots` after `expanduser().resolve()`. Any root outside `$HOME` raises `ConfigError` before watch or ingest starts — unless the user has explicitly opted in via `watch.allow_roots_outside_home = true` (see below).
-- **`PollingSource(root)`** validates `root.resolve()` against `Path.home().resolve()` at construction time. Any root outside `$HOME` raises `PrivacyViolationError` and records a CRITICAL `CodevigilError` on the channel before the exception propagates.
+- **`PollingSource(root)`** validates `root.resolve()` against `Path.home().resolve()` at construction time. Any root outside `$HOME` raises `PrivacyViolationError` and records a CRITICAL `CodevigilError` on the channel before the exception propagates. Honors the `watch.allow_roots_outside_home` opt-in: when the flag is set, the runtime constructor accepts outside-`$HOME` roots so `codevigil watch` does not crash after `resolve_watch_roots()` has already admitted them.
 - **`JsonFileRenderer(output_dir)`** applies the same check at construction time. Same error path. **Not** affected by `allow_roots_outside_home`.
 - **`codevigil report --output DIR`** applies the same check before writing any file. **Not** affected by `allow_roots_outside_home`.
 

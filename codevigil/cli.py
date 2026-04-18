@@ -641,6 +641,7 @@ def _run_watch(args: argparse.Namespace) -> int:
 
     try:
         roots = resolve_watch_roots(cfg)
+        allow_outside_home = bool(watch_cfg.get("allow_roots_outside_home", False))
         sources = [
             PollingSource(
                 root.root_path,
@@ -650,6 +651,7 @@ def _run_watch(args: argparse.Namespace) -> int:
                 max_files=int(watch_cfg["max_files"]),
                 large_file_warn_bytes=int(watch_cfg["large_file_warn_bytes"]),
                 seed_cursors=seed_cursors,
+                allow_outside_home=allow_outside_home,
             )
             for root in roots
         ]
