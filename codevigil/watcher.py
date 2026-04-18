@@ -173,6 +173,12 @@ class PollingSource:
     scope rule (``docs/design.md`` §Privacy Enforcement); a CRITICAL error
     is also recorded on the error channel so operators see the attempt in
     the JSONL log.
+
+    Callers may opt into watch roots outside ``$HOME`` by passing
+    ``allow_outside_home=True`` — this is the runtime counterpart to the
+    ``watch.allow_roots_outside_home`` config flag. The opt-in is deliberately
+    scoped to watcher reads; renderer and report output paths keep their own
+    unconditional ``$HOME`` gates.
     """
 
     def __init__(
@@ -186,13 +192,14 @@ class PollingSource:
         large_file_warn_bytes: int = 10 * 1024 * 1024,
         cache_path: Path | None = None,
         seed_cursors: dict[Path, CachedCursor] | None = None,
+        allow_outside_home: bool = False,
     ) -> None:
         self._interval: float = interval
         self._max_files: int = max_files
         self._large_file_warn_bytes: int = large_file_warn_bytes
         self._cursors: dict[Path, FileCursor] = {}
         self._overflow_warned: bool = False
-        self._root: Path = self._validate_root(root)
+        self._root: Path = self._validate_root(root, allow_outside_home=allow_outside_home)
         self._root_id: str = root_id if root_id is not None else make_root_id(self._root)
         self._root_label: str = root_label if root_label is not None else str(self._root)
         # First-tick instrumentation: log cold-start costs at INFO so users
@@ -236,10 +243,19 @@ class PollingSource:
     # ------------------------------------------------------------------ scope
 
     @staticmethod
-    def _validate_root(root: Path) -> Path:
-        """Resolve the root once and refuse anything outside ``$HOME``."""
+    def _validate_root(root: Path, *, allow_outside_home: bool = False) -> Path:
+        """Resolve the root once and refuse anything outside ``$HOME``.
+
+        When ``allow_outside_home`` is true (set from the
+        ``watch.allow_roots_outside_home`` opt-in), the scope check is skipped
+        so cross-environment setups — Windows host watching WSL's ext4 tree
+        via ``\\\\wsl.localhost\\...``, SSHFS-mounted remote dev boxes,
+        multi-profile homes — can resolve a root that lies outside ``$HOME``.
+        """
 
         resolved_root = root.expanduser().resolve()
+        if allow_outside_home:
+            return resolved_root
         home = Path.home().resolve()
         if not resolved_root.is_relative_to(home):
             err = CodevigilError(
@@ -248,7 +264,9 @@ class PollingSource:
                 code="watcher.path_scope_violation",
                 message=(
                     f"watcher root {str(resolved_root)!r} is outside the user "
-                    f"home directory {str(home)!r}; refusing to walk"
+                    f"home directory {str(home)!r}; refusing to walk. "
+                    f"Set watch.allow_roots_outside_home = true (or "
+                    f"CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME=true) to opt in explicitly."
                 ),
                 context={
                     "root": str(resolved_root),

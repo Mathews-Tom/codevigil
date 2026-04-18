@@ -34,6 +34,16 @@ CONFIG_DEFAULTS: dict[str, Any] = {
     "watch": {
         "root": "~/.claude/projects",
         "roots": ["~/.claude/projects"],
+        # When false (the default), every resolved entry in ``watch.roots``
+        # must lie under ``$HOME`` after ``expanduser().resolve()``. Set to
+        # true to opt into watching roots outside ``$HOME`` — required for
+        # cross-environment setups such as a Windows host watching WSL's
+        # ext4 ``/home/<user>/.claude/projects`` via ``\\wsl.localhost\...``,
+        # or a developer workstation observing a mounted remote dev box.
+        # Flipping this only relaxes the scope check for ``watch.roots``;
+        # the ``report.output_dir`` and renderer output-dir gates keep
+        # enforcing ``$HOME`` unconditionally so writes can never escape.
+        "allow_roots_outside_home": False,
         "poll_interval": 60.0,
         "max_files": 2000,
         "large_file_warn_bytes": 10 * 1024 * 1024,
@@ -167,6 +177,7 @@ _ENV_BINDINGS: dict[str, tuple[str, ...]] = {
     "CODEVIGIL_LOG_PATH": ("logging", "log_path"),
     "CODEVIGIL_WATCH_ROOT": ("watch", "root"),
     "CODEVIGIL_WATCH_ROOTS": ("watch", "roots"),
+    "CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME": ("watch", "allow_roots_outside_home"),
     "CODEVIGIL_WATCH_POLL_INTERVAL": ("watch", "poll_interval"),
     "CODEVIGIL_WATCH_TICK_INTERVAL": ("watch", "tick_interval"),
     "CODEVIGIL_WATCH_DISPLAY_LIMIT": ("watch", "display_limit"),
@@ -885,10 +896,13 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
 
     raw_roots = _read_dotted(values, "watch.roots")
     home = Path.home().resolve()
+    allow_outside_home = bool(
+        _read_dotted_optional(values, "watch.allow_roots_outside_home") or False
+    )
     descriptors: list[RootDescriptor] = []
     seen_paths: set[Path] = set()
     for raw in raw_roots:
-        path = _resolve_watch_root_path(raw, home)
+        path = _resolve_watch_root_path(raw, home, allow_outside_home=allow_outside_home)
         if path in seen_paths:
             continue
         overlapping = _find_overlapping_root(path, seen_paths)
@@ -912,13 +926,24 @@ def resolve_watch_roots(values: dict[str, Any]) -> list[RootDescriptor]:
     return descriptors
 
 
-def _resolve_watch_root_path(raw: Any, home: Path) -> Path:
+def _resolve_watch_root_path(
+    raw: Any,
+    home: Path,
+    *,
+    allow_outside_home: bool = False,
+) -> Path:
     path = Path(str(raw)).expanduser().resolve()
     if path.is_relative_to(home):
         return path
+    if allow_outside_home:
+        return path
     raise ConfigError(
         code="config.watch_root_scope_violation",
-        message=f"watch root {str(path)!r} is outside the user home directory {str(home)!r}",
+        message=(
+            f"watch root {str(path)!r} is outside the user home directory {str(home)!r}. "
+            f"Set watch.allow_roots_outside_home = true (or "
+            f"CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME=true) to opt in explicitly."
+        ),
         context={"root": str(path), "home": str(home)},
     )
 

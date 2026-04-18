@@ -7,7 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-no changes yet.
+### Added
+
+- **`watch.allow_roots_outside_home`** (bool, default `false`). Opt-in flag that lets `watch.roots` include paths outside `$HOME`. Required for cross-environment setups such as a Windows host watching WSL's ext4 `/home/<user>/.claude/projects/` through `\\wsl.localhost\...`, a workstation observing a mounted remote dev box (SSHFS/NFS), or a multi-profile layout where two user homes sit under different parents. Settable via TOML or `CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME` env var. The flag is threaded through both scope gates that admit watch roots — `resolve_watch_roots()` at config time and `PollingSource(...)` at runtime — so `codevigil config check`, `codevigil ingest`, and `codevigil watch` all honor the opt-in consistently. **Scoped to reads only**: `report.output_dir` and the renderer output-dir gates keep enforcing `$HOME` unconditionally, so writes cannot escape regardless of this flag. The default remains strict and both scope-violation error messages now name the flag so users discover the opt-in rather than guessing. Resolves the cross-host gap left open by #44 on top of v0.4.0's `watch.roots` plumbing.
+
+### Fixed
+
+- **`codevigil config check` now surfaces watch-root scope and overlap violations.** Previously `config check` returned 0 for configs that `ingest` / `watch` / `report` would subsequently reject with `config.watch_root_scope_violation` or `config.overlapping_watch_roots`. `config check` now calls `resolve_watch_roots()` after the loader so users discover a bad config at check time, not at first real invocation. Exit code is `2` on violation, matching the behaviour of the commands that consume the resolved roots.
 
 ## [0.3.0] - 2026-04-16
 

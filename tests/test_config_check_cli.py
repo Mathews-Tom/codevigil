@@ -103,6 +103,53 @@ def test_config_check_reports_validation_error(
     assert "out_of_range" in err or "poll_interval" in err
 
 
+def test_config_check_surfaces_watch_root_scope_violation(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``config check`` must reject an outside-``$HOME`` root, not green-light it.
+
+    Prior behaviour: ``config check`` returned 0 and ingest/watch subsequently
+    failed with ``config.watch_root_scope_violation``. Parity fix: the same
+    check runs in ``config check`` so users find out early.
+    """
+
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for env_key in list(k for k in __import__("os").environ if k.startswith("CODEVIGIL_")):
+        monkeypatch.delenv(env_key, raising=False)
+    monkeypatch.setenv("CODEVIGIL_WATCH_ROOTS", str(outside))
+
+    exit_code = main(["config", "check"])
+    assert exit_code == 2
+    err = capsys.readouterr().err
+    assert "watch_root_scope_violation" in err
+    assert "allow_roots_outside_home" in err
+
+
+def test_config_check_accepts_outside_home_with_opt_in(
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))
+    (tmp_path / "home").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    for env_key in list(k for k in __import__("os").environ if k.startswith("CODEVIGIL_")):
+        monkeypatch.delenv(env_key, raising=False)
+    monkeypatch.setenv("CODEVIGIL_WATCH_ROOTS", str(outside))
+    monkeypatch.setenv("CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME", "true")
+
+    exit_code = main(["config", "check"])
+    assert exit_code == 0
+    out = capsys.readouterr().out
+    assert "watch.allow_roots_outside_home = True" in out
+
+
 def test_bare_invocation_prints_version(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

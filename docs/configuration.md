@@ -28,8 +28,9 @@ The default config tree has these top-level sections:
 
 | Key                     | Type        | Default                    | Description                                                                                                                                                                                                                                                                                              |
 | ----------------------- | ----------- | -------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `roots`                 | `list[str]` | `["~/.claude/projects"]`   | Canonical list of watch roots. Each path must resolve under `$HOME`. Duplicate paths collapse after `expanduser().resolve()`.                                                                                                                                                                            |
+| `roots`                 | `list[str]` | `["~/.claude/projects"]`   | Canonical list of watch roots. Each path must resolve under `$HOME` unless `allow_roots_outside_home` is opted into. Duplicate paths collapse after `expanduser().resolve()`. Env: `CODEVIGIL_WATCH_ROOTS` (PATH-separated: `:` on POSIX, `;` on Windows).                                               |
 | `root`                  | `str`       | `~/.claude/projects`       | Deprecated single-root compatibility alias. It resolves to the first entry in `watch.roots` and should not be used in new configs.                                                                                                                                                                       |
+| `allow_roots_outside_home` | `bool`   | `false`                    | When `false` (default), every resolved entry in `watch.roots` must lie under `$HOME`. Set to `true` to opt into watching roots outside `$HOME`. Required for cross-environment setups such as a Windows host watching WSL's ext4 `/home/<user>/.claude/projects/` via `\\wsl.localhost\...`, or a workstation observing a mounted remote dev box. Only relaxes the scope check for `watch.roots`; `report.output_dir` and the renderer output-dir gates keep enforcing `$HOME` unconditionally. Env: `CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME`.                                                                                                                                                                           |
 | `poll_interval`         | `float`     | `2.0`                      | Seconds between filesystem polls. Range: `[0.05, 3600]`.                                                                                                                                                                                                                                                 |
 | `tick_interval`         | `float`     | `1.0`                      | Seconds between aggregator ticks (and terminal frames). Range: `[0.05, 3600]`.                                                                                                                                                                                                                           |
 | `max_files`             | `int`       | `2000`                     | Cap on the number of session files walked per poll. Overflow logs one WARN per run and processes the first N deterministically. Range: `[1, 1_000_000]`.                                                                                                                                                 |
@@ -247,17 +248,18 @@ With the default `enable_persistence = false`, `codevigil watch` creates no file
 
 Only the keys in this map can be overridden via the environment. Every other key must be set in TOML or on the CLI. The bindings are kept small on purpose — a typo in a `CODEVIGIL_*` variable that is not in this list is a no-op, not a silent override.
 
-| Environment variable             | Maps to                   |
-| -------------------------------- | ------------------------- |
-| `CODEVIGIL_WATCH_ROOTS`          | `watch.roots`             |
-| `CODEVIGIL_LOG_PATH`             | `logging.log_path`        |
-| `CODEVIGIL_WATCH_ROOT`           | `watch.root` (deprecated) |
-| `CODEVIGIL_WATCH_POLL_INTERVAL`  | `watch.poll_interval`     |
-| `CODEVIGIL_WATCH_TICK_INTERVAL`  | `watch.tick_interval`     |
-| `CODEVIGIL_WATCH_DISPLAY_LIMIT`  | `watch.display_limit`     |
-| `CODEVIGIL_REPORT_OUTPUT_DIR`    | `report.output_dir`       |
-| `CODEVIGIL_REPORT_OUTPUT_FORMAT` | `report.output_format`    |
-| `CODEVIGIL_BOOTSTRAP_SESSIONS`   | `bootstrap.sessions`      |
+| Environment variable                  | Maps to                              |
+| ------------------------------------- | ------------------------------------ |
+| `CODEVIGIL_WATCH_ROOTS`               | `watch.roots`                        |
+| `CODEVIGIL_ALLOW_ROOTS_OUTSIDE_HOME`  | `watch.allow_roots_outside_home`     |
+| `CODEVIGIL_LOG_PATH`                  | `logging.log_path`                   |
+| `CODEVIGIL_WATCH_ROOT`                | `watch.root` (deprecated)            |
+| `CODEVIGIL_WATCH_POLL_INTERVAL`       | `watch.poll_interval`                |
+| `CODEVIGIL_WATCH_TICK_INTERVAL`       | `watch.tick_interval`                |
+| `CODEVIGIL_WATCH_DISPLAY_LIMIT`       | `watch.display_limit`                |
+| `CODEVIGIL_REPORT_OUTPUT_DIR`         | `report.output_dir`                  |
+| `CODEVIGIL_REPORT_OUTPUT_FORMAT`      | `report.output_format`               |
+| `CODEVIGIL_BOOTSTRAP_SESSIONS`        | `bootstrap.sessions`                 |
 
 Environment values arrive as strings and are coerced against the default's declared type. `CODEVIGIL_WATCH_POLL_INTERVAL=0.5` parses as `float`; `CODEVIGIL_BOOTSTRAP_SESSIONS=20` parses as `int`. `CODEVIGIL_WATCH_ROOTS` uses `os.pathsep` splitting (`:` on Unix-like systems). Coercion failures raise `ConfigError("config.type_mismatch")`.
 
